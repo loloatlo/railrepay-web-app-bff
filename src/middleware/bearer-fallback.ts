@@ -40,11 +40,29 @@ const logger = createLogger({
  * @returns Express RequestHandler
  */
 export function createBearerFallbackMiddleware(): RequestHandler {
+  /**
+   * Paths that bypass Bearer enforcement (WEB-BFF-003):
+   *   - /api/auth/otp/start  — pre-auth, no session needed
+   *   - /api/auth/otp/verify — pre-auth, no session needed
+   *   - /api/auth/logout     — idempotent; handler handles missing-session case (AC-4.2)
+   */
+  const PRE_AUTH_PATHS = new Set([
+    '/api/auth/otp/start',
+    '/api/auth/otp/verify',
+    '/api/auth/logout',
+  ]);
+
   return async function bearerFallbackMiddleware(
     req: Request,
     res: Response,
     next: NextFunction
   ): Promise<void> {
+    // Pre-auth OTP routes do not require a session — skip Bearer enforcement
+    if (PRE_AUTH_PATHS.has(req.path)) {
+      next();
+      return;
+    }
+
     const cookieName = process.env.SESSION_COOKIE_NAME ?? 'rr_session';
     const cookies = req.cookies as Record<string, string | undefined>;
 

@@ -20,6 +20,7 @@ import { type Redis } from 'ioredis';
 import { createHealthRouter } from './routes/health.js';
 import { createMetricsRouter } from './routes/metrics.js';
 import { createSessionIssueRouter, createProtectedSessionRouter } from './routes/session.js';
+import { createAuthPreAuthRouter, createAuthProtectedRouter } from './routes/auth.js';
 import { createCorsMiddleware } from './middleware/cors.js';
 import { createCorrelationIdMiddleware } from './middleware/correlation-id.js';
 import { createRequireSameOriginMiddleware } from './middleware/require-same-origin.js';
@@ -35,7 +36,7 @@ import { createBearerFallbackMiddleware } from './middleware/bearer-fallback.js'
  * @param redis - ioredis client (injected for testability)
  * @returns Configured Express application (not yet listening)
  */
-export function createApp(redis: Pick<Redis, 'ping' | 'get' | 'expire' | 'set'>): Express {
+export function createApp(redis: Pick<Redis, 'ping' | 'get' | 'expire' | 'set' | 'del'>): Express {
   const app = express();
 
   // Trust proxy headers — required for Railway/proxy environments (ADR note)
@@ -66,6 +67,10 @@ export function createApp(redis: Pick<Redis, 'ping' | 'get' | 'expire' | 'set'>)
   // Mounted BEFORE the auth middleware chain so the bearer-fallback doesn't block it.
   app.use(createSessionIssueRouter(redis));
 
+  // Pre-auth /api/auth/* routes: POST /api/auth/otp/start, POST /api/auth/otp/verify
+  // Mounted BEFORE session middleware (no session required for OTP flows)
+  app.use(createAuthPreAuthRouter(redis));
+
   // Session authentication middleware chain:
   //   1. Cookie-session: populates req.session from rr_session cookie
   //   2. Bearer-fallback: populates req.session from Authorization: Bearer JWT
@@ -75,6 +80,10 @@ export function createApp(redis: Pick<Redis, 'ping' | 'get' | 'expire' | 'set'>)
 
   // Protected session routes: GET /api/session, POST /api/session/refresh
   app.use(createProtectedSessionRouter(redis));
+
+  // Protected /api/auth/* routes: GET /api/auth/me, POST /api/auth/logout
+  // Mounted AFTER session middleware so req.session is populated
+  app.use(createAuthProtectedRouter(redis));
 
   return app;
 }

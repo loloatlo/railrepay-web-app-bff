@@ -1,22 +1,25 @@
 /**
  * Auth-service HTTP client for web-app-bff
  *
- * Provides refreshAccessToken helper that calls the auth-service
- * POST /auth/sessions/refresh endpoint to obtain a new access token,
- * then updates the Redis session row with the new token.
+ * Provides refreshAccessToken, startOtp, verifyOtp, revokeSession helpers.
+ * All outbound calls are wrapped in a 5 s AbortController timeout (OQ-D lock).
  *
  * Also re-exports createSession from session-store so that integration
  * tests which import createSession from auth-service-client work correctly.
  *
- * Story   : RAILREPAY-WEB-BFF-002
+ * Story   : RAILREPAY-WEB-BFF-002 / RAILREPAY-WEB-BFF-003
  * AC-8    : refreshAccessToken calls POST /auth/sessions/refresh
+ * AC-1.1  : startOtp calls POST /auth/otp/start
+ * AC-2.1  : verifyOtp calls POST /auth/otp/verify
+ * AC-4.1  : revokeSession calls POST /auth/sessions/revoke (best-effort)
+ * AC-1.6  : 5 s AbortController timeout on ALL calls
  * AC-10   : Uses @railrepay/winston-logger (not console.log)
  *
- * Mocked HTTP endpoint:
+ * Mocked HTTP endpoints:
  *   POST {AUTH_SERVICE_URL}/auth/sessions/refresh
- *   Verified real: services/auth-service/src/handlers/refresh.handler.ts handleRefresh
- *   Exposed at: services/auth-service/src/routes/sessions.ts mounted at /auth/sessions/refresh
- *   Last verified: 2026-04-26 (Jessie WEB-BFF-002 US-2)
+ *   POST {AUTH_SERVICE_URL}/auth/otp/start
+ *   POST {AUTH_SERVICE_URL}/auth/otp/verify
+ *   POST {AUTH_SERVICE_URL}/auth/sessions/revoke
  *
  * ADR references:
  *   ADR-002 — Structured logging with correlation IDs
@@ -30,6 +33,9 @@ import { createLogger } from '@railrepay/winston-logger';
 import type { Redis } from 'ioredis';
 import { getSession, sessionRedisKey, SESSION_TTL_SECONDS } from './session-store.js';
 
+/** Outbound HTTP timeout — 5 s AbortController (OQ-D lock, WEB-BFF-003) */
+export const AUTH_SERVICE_TIMEOUT_MS = 5000;
+
 // Re-export createSession so integration tests that import from auth-service-client work
 export { createSession } from './session-store.js';
 
@@ -42,18 +48,20 @@ const logger = createLogger({
 /**
  * Minimal HTTP POST helper using Node's built-in http/https modules.
  * Uses http/https (not native fetch) so that nock can intercept in tests.
+ * Accepts an optional AbortSignal for timeout support.
  */
 function httpPost<T>(
   url: string,
   body: unknown,
-  headers: Record<string, string>
+  headers: Record<string, string>,
+  signal?: AbortSignal
 ): Promise<{ statusCode: number; body: T }> {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
     const isHttps = parsedUrl.protocol === 'https:';
     const transport = isHttps ? https : http;
 
-    const payload = body !== null ? JSON.stringify(body) : '';
+    const payload = body !== null && body !== undefined ? JSON.stringify(body) : '';
 
     const reqHeaders: Record<string, string> = {
       ...headers,
@@ -83,11 +91,179 @@ function httpPost<T>(
 
     req.on('error', reject);
 
+    // Honour AbortSignal — destroy request on abort
+    if (signal) {
+      if (signal.aborted) {
+        req.destroy(new Error('AbortError'));
+        return;
+      }
+      signal.addEventListener('abort', () => {
+        req.destroy(new Error('AbortError'));
+      });
+    }
+
     if (payload) {
       req.write(payload);
     }
     req.end();
   });
+}
+
+/**
+ * Wrap a promise with an AbortController-based timeout.
+ * On timeout, rejects with an Error whose message is 'AbortError'.
+ *
+ * @param fn    Factory that receives an AbortSignal and returns a Promise<T>
+ * @param ms    Timeout in milliseconds (default: AUTH_SERVICE_TIMEOUT_MS)
+ */
+function withTimeout<T>(
+  fn: (signal: AbortSignal) => Promise<T>,
+  ms: number = AUTH_SERVICE_TIMEOUT_MS
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  return fn(controller.signal).finally(() => clearTimeout(timer));
+}
+
+/** VerifyOtpResult from auth-service (WEB-BFF-003) */
+export interface VerifyOtpResult {
+  user_id: string;
+  session_id: string;
+  access_token: string;
+  expires_in: number;
+}
+
+/**
+ * Call POST /auth/otp/start on auth-service.
+ * Returns { statusCode, body } for the handler to interpret.
+ * Wrapped with 5 s AbortController timeout (AC-1.6).
+ *
+ * @param phone_e164    E.164 phone number
+ * @param channel       'web' | 'rn' | 'swift'
+ * @param correlationId Optional x-correlation-id to forward
+ */
+export async function startOtp(
+  phone_e164: string,
+  channel: string,
+  correlationId?: string
+): Promise<{ statusCode: number; body: Record<string, unknown> }> {
+  const authServiceUrl = process.env.AUTH_SERVICE_URL ?? '';
+  const url = `${authServiceUrl}/auth/otp/start`;
+
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (correlationId) {
+    headers['x-correlation-id'] = correlationId;
+  }
+
+  logger.info('startOtp: calling auth-service', {
+    component: 'web-app-bff/auth-service-client',
+  });
+
+  try {
+    const { statusCode, body } = await withTimeout<{ statusCode: number; body: Record<string, unknown> }>(
+      (signal) =>
+        httpPost<Record<string, unknown>>(
+          url,
+          { phone_e164, channel },
+          headers,
+          signal
+        ),
+      AUTH_SERVICE_TIMEOUT_MS
+    );
+    return { statusCode, body };
+  } catch (err) {
+    logger.warn('startOtp: request failed or timed out', {
+      component: 'web-app-bff/auth-service-client',
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { statusCode: 503, body: { error: 'upstream_unavailable' } };
+  }
+}
+
+/**
+ * Call POST /auth/otp/verify on auth-service.
+ * Returns { statusCode, body } for the handler to interpret.
+ * Wrapped with 5 s AbortController timeout (AC-1.6).
+ *
+ * @param phone_e164    E.164 phone number
+ * @param channel       'web' | 'rn' | 'swift'
+ * @param code          OTP code (4-10 digit numeric)
+ * @param correlationId Optional x-correlation-id to forward
+ */
+export async function verifyOtp(
+  phone_e164: string,
+  channel: string,
+  code: string,
+  correlationId?: string
+): Promise<{ statusCode: number; body: Record<string, unknown> }> {
+  const authServiceUrl = process.env.AUTH_SERVICE_URL ?? '';
+  const url = `${authServiceUrl}/auth/otp/verify`;
+
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (correlationId) {
+    headers['x-correlation-id'] = correlationId;
+  }
+
+  logger.info('verifyOtp: calling auth-service', {
+    component: 'web-app-bff/auth-service-client',
+  });
+
+  try {
+    const { statusCode, body } = await withTimeout<{ statusCode: number; body: Record<string, unknown> }>(
+      (signal) =>
+        httpPost<Record<string, unknown>>(
+          url,
+          { phone_e164, channel, code },
+          headers,
+          signal
+        ),
+      AUTH_SERVICE_TIMEOUT_MS
+    );
+    return { statusCode, body };
+  } catch (err) {
+    logger.warn('verifyOtp: request failed or timed out', {
+      component: 'web-app-bff/auth-service-client',
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { statusCode: 503, body: { error: 'upstream_unavailable' } };
+  }
+}
+
+/**
+ * Call POST /auth/sessions/revoke on auth-service (best-effort).
+ * Swallows ALL errors — UX hardening: logout must succeed even when revoke fails (AC-4.3).
+ *
+ * @param accessToken   The session's access_token used as Bearer
+ */
+export async function revokeSession(accessToken: string): Promise<void> {
+  const authServiceUrl = process.env.AUTH_SERVICE_URL ?? '';
+  const url = `${authServiceUrl}/auth/sessions/revoke`;
+
+  logger.info('revokeSession: calling auth-service revoke', {
+    component: 'web-app-bff/auth-service-client',
+  });
+
+  try {
+    await withTimeout<{ statusCode: number; body: Record<string, unknown> }>(
+      (signal) =>
+        httpPost<Record<string, unknown>>(
+          url,
+          null,
+          {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          signal
+        ),
+      AUTH_SERVICE_TIMEOUT_MS
+    );
+  } catch (err) {
+    // Swallow all errors — UX hardening (AC-4.3)
+    logger.warn('revokeSession: auth-service revoke failed (swallowed)', {
+      component: 'web-app-bff/auth-service-client',
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -131,10 +307,15 @@ export async function refreshAccessToken(
     component: 'web-app-bff/auth-service-client',
   });
 
-  const { statusCode, body } = await httpPost<{ access_token: string; expires_in: number }>(
-    url,
-    null,
-    { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }
+  const { statusCode, body } = await withTimeout<{ statusCode: number; body: { access_token: string; expires_in: number } }>(
+    (signal) =>
+      httpPost<{ access_token: string; expires_in: number }>(
+        url,
+        null,
+        { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' },
+        signal
+      ),
+    AUTH_SERVICE_TIMEOUT_MS
   );
 
   if (statusCode === 401) {

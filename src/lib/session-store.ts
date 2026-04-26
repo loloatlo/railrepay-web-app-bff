@@ -35,12 +35,16 @@ export interface SessionData {
   access_token: string;
   refresh_at_iso: string;
   created_at_iso: string;
+  /** Auth-service session_id (two-id model — WEB-BFF-003) */
+  auth_service_session_id?: string;
 }
 
 /** Minimum input needed to create a new session */
 export interface CreateSessionInput {
   user_id: string;
   access_token: string;
+  /** Auth-service session_id stored alongside BFF UUID (two-id model — WEB-BFF-003) */
+  auth_service_session_id?: string;
 }
 
 /** Result returned from createSession */
@@ -121,6 +125,9 @@ export async function createSession(
     access_token: input.access_token,
     refresh_at_iso: now,
     created_at_iso: now,
+    ...(input.auth_service_session_id !== undefined
+      ? { auth_service_session_id: input.auth_service_session_id }
+      : {}),
   };
 
   await redis.set(key, JSON.stringify(data), 'EX', SESSION_TTL_SECONDS);
