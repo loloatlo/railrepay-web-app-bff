@@ -13,6 +13,9 @@ export default defineConfig({
       REDIS_URL: 'redis://localhost:6379',
       AUTH_SERVICE_URL: 'http://localhost:9999',
       ALLOWED_ORIGINS: 'https://railrepay-web-app-bff-production.up.railway.app,http://localhost:3000',
+      // Test-safe JWT_SECRET placeholder (≥32 chars). Tests that need a different
+      // value override process.env.JWT_SECRET in their own beforeEach.
+      JWT_SECRET: 'test-secret-32-chars-minimum-aaa',
     },
     coverage: {
       provider: 'v8',

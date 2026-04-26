@@ -15,11 +15,16 @@
  */
 
 import express, { type Express } from 'express';
+import cookieParser from 'cookie-parser';
 import { type Redis } from 'ioredis';
 import { createHealthRouter } from './routes/health.js';
 import { createMetricsRouter } from './routes/metrics.js';
+import { createSessionIssueRouter, createProtectedSessionRouter } from './routes/session.js';
 import { createCorsMiddleware } from './middleware/cors.js';
 import { createCorrelationIdMiddleware } from './middleware/correlation-id.js';
+import { createRequireSameOriginMiddleware } from './middleware/require-same-origin.js';
+import { createCookieSessionMiddleware } from './middleware/cookie-session.js';
+import { createBearerFallbackMiddleware } from './middleware/bearer-fallback.js';
 
 /**
  * Create and configure the web-app-bff Express application.
@@ -30,7 +35,7 @@ import { createCorrelationIdMiddleware } from './middleware/correlation-id.js';
  * @param redis - ioredis client (injected for testability)
  * @returns Configured Express application (not yet listening)
  */
-export function createApp(redis: Pick<Redis, 'ping'>): Express {
+export function createApp(redis: Pick<Redis, 'ping' | 'get' | 'expire' | 'set'>): Express {
   const app = express();
 
   // Trust proxy headers — required for Railway/proxy environments (ADR note)
@@ -42,18 +47,34 @@ export function createApp(redis: Pick<Redis, 'ping'>): Express {
   // CORS middleware — reads ALLOWED_ORIGINS from process.env
   app.use(createCorsMiddleware());
 
+  // Cookie parser — must be mounted before session middleware
+  app.use(cookieParser());
+
   // Correlation ID middleware (ADR-002)
   app.use(createCorrelationIdMiddleware());
 
-  // Read AUTH_SERVICE_URL at createApp() time so integration tests can
-  // set it before calling createApp().
+  // CSRF origin check — blocks state-changing requests from unlisted origins
+  app.use(createRequireSameOriginMiddleware());
+
+  // Health check and metrics: mounted BEFORE auth middleware so they remain
+  // accessible without a session (ADR-008)
   const authServiceUrl = process.env.AUTH_SERVICE_URL ?? '';
-
-  // Health check route (ADR-008)
   app.use('/health', createHealthRouter(redis, { authServiceUrl }));
-
-  // Metrics route (ADR-006)
   app.use('/metrics', createMetricsRouter());
+
+  // POST /api/session/issue — public endpoint (no auth required)
+  // Mounted BEFORE the auth middleware chain so the bearer-fallback doesn't block it.
+  app.use(createSessionIssueRouter(redis));
+
+  // Session authentication middleware chain:
+  //   1. Cookie-session: populates req.session from rr_session cookie
+  //   2. Bearer-fallback: populates req.session from Authorization: Bearer JWT
+  //      (skipped if rr_session cookie is present)
+  app.use(createCookieSessionMiddleware(redis));
+  app.use(createBearerFallbackMiddleware());
+
+  // Protected session routes: GET /api/session, POST /api/session/refresh
+  app.use(createProtectedSessionRouter(redis));
 
   return app;
 }
