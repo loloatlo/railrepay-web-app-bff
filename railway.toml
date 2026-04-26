@@ -1,0 +1,21 @@
+# Railway Deployment Configuration
+# Service: web-app-bff
+# ADR Compliance: ADR-005 (Railway native rollback), ADR-008 (health checks), ADR-023 (BFF)
+
+[build]
+# Use Dockerfile for explicit build control and multi-stage optimisation
+builder = "DOCKERFILE"
+dockerfilePath = "./Dockerfile"
+
+[deploy]
+# BFF is stateless — no migrations step
+healthcheckPath = "/health"
+# Allow 100s for startup (Redis connection, config loading)
+healthcheckTimeout = 100
+# Restart policy for transient failures
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10
+
+[service]
+# Internal port for Railway service mesh
+internalPort = 3000
