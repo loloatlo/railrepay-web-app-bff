@@ -21,6 +21,7 @@ import { createHealthRouter } from './routes/health.js';
 import { createMetricsRouter } from './routes/metrics.js';
 import { createSessionIssueRouter, createProtectedSessionRouter } from './routes/session.js';
 import { createAuthPreAuthRouter, createAuthProtectedRouter } from './routes/auth.js';
+import { createTicketsRouter } from './routes/tickets.js';
 import { createCorsMiddleware } from './middleware/cors.js';
 import { createCorrelationIdMiddleware } from './middleware/correlation-id.js';
 import { createRequireSameOriginMiddleware } from './middleware/require-same-origin.js';
@@ -84,6 +85,10 @@ export function createApp(redis: Pick<Redis, 'ping' | 'get' | 'expire' | 'set' |
   // Protected /api/auth/* routes: GET /api/auth/me, POST /api/auth/logout
   // Mounted AFTER session middleware so req.session is populated
   app.use(createAuthProtectedRouter(redis));
+
+  // Protected /api/tickets/* routes: POST upload, GET /:scanId
+  // Mounted AFTER session middleware so req.session is populated
+  app.use(createTicketsRouter(redis));
 
   return app;
 }

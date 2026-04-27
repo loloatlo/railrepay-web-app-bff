@@ -16,6 +16,8 @@ export interface Config {
   port: number;
   /** Auth service base URL (AUTH_SERVICE_URL env var) */
   authServiceUrl: string;
+  /** OCR service base URL (OCR_SERVICE_URL env var) */
+  ocrServiceUrl: string;
   /** Redis connection URL (REDIS_URL env var) */
   redisUrl: string;
   /** Comma-separated list of allowed CORS origins (ALLOWED_ORIGINS env var) */
@@ -62,6 +64,14 @@ export function getConfig(): Config {
   if (!authServiceUrl) {
     throw new Error(
       'web-app-bff: required environment variable AUTH_SERVICE_URL is not set'
+    );
+  }
+
+  const ocrServiceUrl = process.env.OCR_SERVICE_URL;
+
+  if (!ocrServiceUrl) {
+    throw new Error(
+      'auth-service: required environment variable OCR_SERVICE_URL is not set'
     );
   }
 
@@ -118,6 +128,7 @@ export function getConfig(): Config {
   return {
     port,
     authServiceUrl,
+    ocrServiceUrl,
     redisUrl,
     allowedOrigins,
     logLevel,
