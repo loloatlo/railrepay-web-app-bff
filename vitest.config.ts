@@ -16,6 +16,9 @@ export default defineConfig({
       // Test-safe JWT_SECRET placeholder (≥32 chars). Tests that need a different
       // value override process.env.JWT_SECRET in their own beforeEach.
       JWT_SECRET: 'test-secret-32-chars-minimum-aaa',
+      // Test-safe OCR_SERVICE_URL placeholder (SOP-IMPROVEMENT-004, WEB-BFF-004 US-2).
+      // Integration tests override this via beforeAll.
+      OCR_SERVICE_URL: 'http://ocr-stub.test',
     },
     coverage: {
       provider: 'v8',
