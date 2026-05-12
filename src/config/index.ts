@@ -18,6 +18,12 @@ export interface Config {
   authServiceUrl: string;
   /** OCR service base URL (OCR_SERVICE_URL env var) */
   ocrServiceUrl: string;
+  /** Journey-matcher service base URL (JOURNEY_MATCHER_URL env var) */
+  journeyMatcherUrl: string;
+  /** Delay-tracker service base URL (DELAY_TRACKER_URL env var) */
+  delayTrackerUrl: string;
+  /** Eligibility-engine service base URL (ELIGIBILITY_ENGINE_URL env var) */
+  eligibilityEngineUrl: string;
   /** Redis connection URL (REDIS_URL env var) */
   redisUrl: string;
   /** Comma-separated list of allowed CORS origins (ALLOWED_ORIGINS env var) */
@@ -75,6 +81,27 @@ export function getConfig(): Config {
     );
   }
 
+  const journeyMatcherUrl = process.env.JOURNEY_MATCHER_URL;
+  if (!journeyMatcherUrl) {
+    throw new Error(
+      'web-app-bff: required environment variable JOURNEY_MATCHER_URL is not set'
+    );
+  }
+
+  const delayTrackerUrl = process.env.DELAY_TRACKER_URL;
+  if (!delayTrackerUrl) {
+    throw new Error(
+      'web-app-bff: required environment variable DELAY_TRACKER_URL is not set'
+    );
+  }
+
+  const eligibilityEngineUrl = process.env.ELIGIBILITY_ENGINE_URL;
+  if (!eligibilityEngineUrl) {
+    throw new Error(
+      'web-app-bff: required environment variable ELIGIBILITY_ENGINE_URL is not set'
+    );
+  }
+
   if (!redisUrl) {
     throw new Error(
       'web-app-bff: required environment variable REDIS_URL is not set'
@@ -129,6 +156,9 @@ export function getConfig(): Config {
     port,
     authServiceUrl,
     ocrServiceUrl,
+    journeyMatcherUrl,
+    delayTrackerUrl,
+    eligibilityEngineUrl,
     redisUrl,
     allowedOrigins,
     logLevel,

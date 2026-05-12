@@ -22,6 +22,7 @@ import { createMetricsRouter } from './routes/metrics.js';
 import { createSessionIssueRouter, createProtectedSessionRouter } from './routes/session.js';
 import { createAuthPreAuthRouter, createAuthProtectedRouter } from './routes/auth.js';
 import { createTicketsRouter } from './routes/tickets.js';
+import { createJourneysRouter } from './routes/journeys.js';
 import { createCorsMiddleware } from './middleware/cors.js';
 import { createCorrelationIdMiddleware } from './middleware/correlation-id.js';
 import { createRequireSameOriginMiddleware } from './middleware/require-same-origin.js';
@@ -89,6 +90,10 @@ export function createApp(redis: Pick<Redis, 'ping' | 'get' | 'expire' | 'set' |
   // Protected /api/tickets/* routes: POST upload, GET /:scanId
   // Mounted AFTER session middleware so req.session is populated
   app.use(createTicketsRouter(redis));
+
+  // Protected /api/journeys/* routes: POST /check-delay
+  // Mounted AFTER session middleware so req.session is populated (WEB-BFF-005)
+  app.use(createJourneysRouter(redis));
 
   return app;
 }

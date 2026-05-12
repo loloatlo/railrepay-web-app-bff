@@ -19,6 +19,11 @@ export default defineConfig({
       // Test-safe OCR_SERVICE_URL placeholder (SOP-IMPROVEMENT-004, WEB-BFF-004 US-2).
       // Integration tests override this via beforeAll.
       OCR_SERVICE_URL: 'http://ocr-stub.test',
+      // Test-safe upstream service URL placeholders (WEB-BFF-005 US-3).
+      // Integration tests override these via beforeAll.
+      JOURNEY_MATCHER_URL: 'http://journey-matcher-stub.test',
+      DELAY_TRACKER_URL: 'http://delay-tracker-stub.test',
+      ELIGIBILITY_ENGINE_URL: 'http://eligibility-engine-stub.test',
     },
     coverage: {
       provider: 'v8',
