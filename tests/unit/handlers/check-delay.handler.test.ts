@@ -94,13 +94,23 @@ vi.mock('@railrepay/winston-logger', () => ({
 }));
 
 // Shared metrics mocks
+// Pattern updated from getOrCreate* (non-existent) to getRegistry+Counter+Histogram
+// per Blake's refactor at commit 0a4b8c7. Behavioral assertion (counter.inc +
+// histogram.observe called per outcome) is UNCHANGED.
+// Self-fix per TD-AUTH-003-3 procedure applied during US-4 re-verification.
 const mockCounter = { inc: vi.fn() };
 const mockHistogram = { observe: vi.fn() };
+const mockRegistry = { getSingleMetric: vi.fn(() => undefined) };
 
-vi.mock('@railrepay/metrics-pusher', () => ({
-  getOrCreateCounter: vi.fn(() => mockCounter),
-  getOrCreateHistogram: vi.fn(() => mockHistogram),
-}));
+vi.mock('@railrepay/metrics-pusher', () => {
+  const MockCounter = vi.fn(() => mockCounter);
+  const MockHistogram = vi.fn(() => mockHistogram);
+  return {
+    getRegistry: vi.fn(() => mockRegistry),
+    Counter: MockCounter,
+    Histogram: MockHistogram,
+  };
+});
 
 // ─── Client mocks — vi.mock hoisted before imports ───────────────────────────
 
