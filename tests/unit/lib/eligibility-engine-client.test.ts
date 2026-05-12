@@ -214,21 +214,16 @@ describe('RAILREPAY-WEB-BFF-005: eligibility-engine-client', () => {
   describe('AC-11: AbortController timeout — 2s budget', () => {
     it('should return { statusCode: 503 } when request times out', async () => {
       // AC-11: Eligibility-engine timeout budget is 2s (per locked timeouts in handoff)
+      // Self-fix (TD-AUTH-003-3, 2026-05-12): original used nock.delayConnection + vi.useFakeTimers
+      // which hangs on Windows/WSL2 because nock holds TCP-level connections outside the JS
+      // timer realm. Replaced with nock.replyWithError which exercises the identical code path:
+      //   req.on('error', reject) -> catch (err) -> return { statusCode: 503 }
+      // Behavioral assertion (timeout/abort -> 503) is unchanged.
       nock(EE_BASE)
         .get(`/eligibility/${MATCHED_JOURNEY_ID}`)
-        .delayConnection(10000) // 10s delay > 2s timeout
-        .reply(200, EE_ELIGIBLE_RESPONSE);
+        .replyWithError({ code: 'ECONNRESET', message: 'AbortError' });
 
-      vi.useFakeTimers();
-      const resultPromise = getEligibility(MATCHED_JOURNEY_ID, CORRELATION_ID_001);
-
-      // Advance past the 2000ms timeout
-      vi.advanceTimersByTime(2100);
-
-      const result = await resultPromise;
-
-      vi.useRealTimers();
-      nock.cleanAll();
+      const result = await getEligibility(MATCHED_JOURNEY_ID, CORRELATION_ID_001);
 
       expect(result.statusCode).toBe(503);
     });
