@@ -69,7 +69,15 @@ export async function startServer(
 
     server.on('error', reject);
 
-    server.listen(config.port, () => {
+    // BL-273: Explicitly bind to '::' (IPv6 dual-stack) so the BFF listens on
+    // both IPv4 (0.0.0.0) and IPv6 (::) simultaneously. Railway's private
+    // network is IPv6-only — DNS for .railway.internal returns AAAA records
+    // only. Without an explicit host of '::' Node's listen() on Alpine Linux
+    // may bind to IPv4 only, causing ECONNREFUSED when the PWA's Next.js
+    // rewrite proxy resolves the private hostname to an IPv6 address.
+    // Binding '::' on Linux enables dual-stack: existing IPv4 callers
+    // (health checks, local dev) continue to work unchanged.
+    server.listen(config.port, '::', () => {
       logger.info('web-app-bff started', {
         component: 'web-app-bff/server',
         port: config.port,
