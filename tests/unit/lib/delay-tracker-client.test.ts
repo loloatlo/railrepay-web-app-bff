@@ -58,7 +58,7 @@ vi.mock('@railrepay/winston-logger', () => ({
 
 // ─── Module under test ────────────────────────────────────────────────────────
 // @ts-expect-error — module does not exist yet (TDD RED phase)
-const { queryDelay } = await import('../../src/lib/delay-tracker-client.js');
+const { queryDelay } = await import('../../../src/lib/delay-tracker-client.js');
 
 const DT_BASE = 'http://delay-tracker-unit-test-bff005.internal';
 

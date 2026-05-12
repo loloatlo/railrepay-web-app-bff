@@ -58,7 +58,7 @@ vi.mock('@railrepay/winston-logger', () => ({
 
 // ─── Module under test ────────────────────────────────────────────────────────
 // @ts-expect-error — module does not exist yet (TDD RED phase)
-const { matchJourney } = await import('../../src/lib/journey-matcher-client.js');
+const { matchJourney } = await import('../../../src/lib/journey-matcher-client.js');
 
 const JM_BASE = 'http://journey-matcher-unit-test-bff005.internal';
 

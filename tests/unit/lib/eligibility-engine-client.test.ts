@@ -63,7 +63,7 @@ vi.mock('@railrepay/winston-logger', () => ({
 
 // ─── Module under test ────────────────────────────────────────────────────────
 // @ts-expect-error — module does not exist yet (TDD RED phase)
-const { getEligibility } = await import('../../src/lib/eligibility-engine-client.js');
+const { getEligibility } = await import('../../../src/lib/eligibility-engine-client.js');
 
 const EE_BASE = 'http://eligibility-engine-unit-test-bff005.internal';
 

@@ -105,23 +105,23 @@ vi.mock('@railrepay/metrics-pusher', () => ({
 // ─── Client mocks — vi.mock hoisted before imports ───────────────────────────
 
 const mockMatchJourney = vi.fn();
-vi.mock('../../src/lib/journey-matcher-client.js', () => ({
+vi.mock('../../../src/lib/journey-matcher-client.js', () => ({
   matchJourney: (...args: unknown[]) => mockMatchJourney(...args),
 }));
 
 const mockQueryDelay = vi.fn();
-vi.mock('../../src/lib/delay-tracker-client.js', () => ({
+vi.mock('../../../src/lib/delay-tracker-client.js', () => ({
   queryDelay: (...args: unknown[]) => mockQueryDelay(...args),
 }));
 
 const mockGetEligibility = vi.fn();
-vi.mock('../../src/lib/eligibility-engine-client.js', () => ({
+vi.mock('../../../src/lib/eligibility-engine-client.js', () => ({
   getEligibility: (...args: unknown[]) => mockGetEligibility(...args),
 }));
 
 // ─── App factory — imports the handler under test ────────────────────────────
 // @ts-expect-error — module does not exist yet (TDD RED phase)
-const { createCheckDelayHandler } = await import('../../src/handlers/check-delay.handler.js');
+const { createCheckDelayHandler } = await import('../../../src/handlers/check-delay.handler.js');
 
 /**
  * Build minimal Express app with session middleware stubbed via req.session injection.
