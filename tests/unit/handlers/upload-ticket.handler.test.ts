@@ -52,6 +52,7 @@ import {
   MINIMAL_PNG_BUFFER,
   OVERSIZED_BUFFER,
   OCR_SCAN_RESPONSE,
+  FULL_OCR_UPLOAD_RESPONSE,
   HAPPY_SCAN_ID,
   PRIMARY_USER,
 } from '../../fixtures/scan-data.js';
@@ -171,7 +172,7 @@ describe('RAILREPAY-WEB-BFF-004: POST /api/tickets/upload handler unit tests', (
       // Last verified: 2026-04-27 (Jessie WEB-BFF-004 US-2)
       nock(OCR_BASE)
         .post('/ocr/scan')
-        .reply(200, OCR_SCAN_RESPONSE);
+        .reply(200, FULL_OCR_UPLOAD_RESPONSE);
 
       const res = await request(app)
         .post('/api/tickets/upload')
@@ -184,6 +185,15 @@ describe('RAILREPAY-WEB-BFF-004: POST /api/tickets/upload handler unit tests', (
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty('scan_id');
       expect(res.body.scan_id).toBe(HAPPY_SCAN_ID);
+      // BL-280: assert BFF forwards full OCR response, not just scan_id
+      expect(res.body.extracted_fields).toEqual(FULL_OCR_UPLOAD_RESPONSE.extracted_fields);
+      expect(res.body.raw_text).toBe(FULL_OCR_UPLOAD_RESPONSE.raw_text);
+      expect(res.body.confidence).toBe(FULL_OCR_UPLOAD_RESPONSE.confidence);
+      expect(res.body.missing_fields).toEqual(FULL_OCR_UPLOAD_RESPONSE.missing_fields);
+      expect(res.body.claim_ready).toBe(FULL_OCR_UPLOAD_RESPONSE.claim_ready);
+      expect(res.body.ocr_status).toBe(FULL_OCR_UPLOAD_RESPONSE.ocr_status);
+      expect(res.body.gcs_upload_status).toBe(FULL_OCR_UPLOAD_RESPONSE.gcs_upload_status);
+      expect(res.body.image_gcs_path).toBe(FULL_OCR_UPLOAD_RESPONSE.image_gcs_path);
     });
 
     it('AC-2: should return 200 { scan_id } for valid PNG image with authenticated session', async () => {

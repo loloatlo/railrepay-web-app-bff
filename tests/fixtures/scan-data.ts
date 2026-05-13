@@ -190,3 +190,36 @@ export const REJECTED_MIME_TYPES = [
 
 /** Valid source values (AC-7, OQ-B multipart text field) */
 export const VALID_SOURCES = ['camera', 'screenshot', 'share', 'clipboard'] as const;
+
+/**
+ * Full OCR scan submission response (POST /ocr/scan → 200).
+ * Shape matches scan.handler.ts:259-274 response (BL-280 fix — AC-2).
+ * DISTINCT from OCR_RESULTS_RESPONSE (GET /ocr/results/:scanId) which
+ * adds error_message, created_at, updated_at from the DB layer.
+ */
+export const FULL_OCR_UPLOAD_RESPONSE = {
+  scan_id: HAPPY_SCAN_ID,
+  status: 'completed' as const,
+  confidence: 0.94,
+  extracted_fields: {
+    origin_station: 'London Paddington',
+    destination_station: 'Bristol Temple Meads',
+    origin_crs: 'PAD',
+    destination_crs: 'BRI',
+    travel_date: '2026-04-27',
+    fare_pence: 8950,
+    ticket_type: 'ANYTIME_RETURN',
+    ticket_class: 'STANDARD',
+    departure_time: '09:30',
+    via_station: null,
+    via_crs: null,
+    operator_name: null,
+    ticket_number: null,
+  },
+  raw_text: 'LONDON PADDINGTON\nBRISTOL TEMPLE MEADS\nANYTIME RETURN £89.50',
+  missing_fields: ['operator_name', 'ticket_number'],
+  claim_ready: true,
+  ocr_status: 'completed' as const,
+  gcs_upload_status: 'uploaded' as const,
+  image_gcs_path: `gs://railrepay-tickets-prod/${PRIMARY_USER.user_id}/${HAPPY_SCAN_ID}.jpg`,
+};

@@ -69,6 +69,7 @@ import {
   OVERSIZED_BUFFER,
   OCR_SCAN_RESPONSE,
   OCR_RESULTS_RESPONSE,
+  FULL_OCR_UPLOAD_RESPONSE,
   HAPPY_SCAN_ID,
   PRIMARY_USER,
   SECOND_USER,
@@ -174,7 +175,7 @@ describe('RAILREPAY-WEB-BFF-004: tickets flow integration tests (Testcontainers 
             typeof body.correlation_id === 'string'
           );
         })
-        .reply(200, OCR_SCAN_RESPONSE);
+        .reply(200, FULL_OCR_UPLOAD_RESPONSE);
 
       const uploadRes = await request(app)
         .post('/api/tickets/upload')
@@ -188,6 +189,10 @@ describe('RAILREPAY-WEB-BFF-004: tickets flow integration tests (Testcontainers 
       // AC-2: 200 { scan_id }
       expect(uploadRes.status).toBe(200);
       expect(uploadRes.body).toHaveProperty('scan_id', HAPPY_SCAN_ID);
+      // BL-280: integration verifies BFF forwards full OCR response over the wire
+      expect(uploadRes.body.extracted_fields).toEqual(FULL_OCR_UPLOAD_RESPONSE.extracted_fields);
+      expect(uploadRes.body.raw_text).toBe(FULL_OCR_UPLOAD_RESPONSE.raw_text);
+      expect(uploadRes.body.claim_ready).toBe(FULL_OCR_UPLOAD_RESPONSE.claim_ready);
 
       // AC-6: nock interceptor was called (verifies outbound HTTP to ocr)
       expect(ocrScope.isDone()).toBe(true);
