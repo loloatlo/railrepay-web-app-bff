@@ -8,7 +8,7 @@
  *
  * Story   : RAILREPAY-WEB-BFF-004
  * AC-1    : 401 when no session
- * AC-2    : Accepts multipart/form-data with `image` field — 200 { scan_id }
+ * AC-2    : Accepts multipart/form-data with `image` field — 200 { scan_id, extracted_fields, raw_text, missing_fields, ... }
  * AC-3    : Missing `image` field → 400 { error: 'image field is required' }
  * AC-4    : Image >10MB → 413 { error: 'image too large', max_bytes: 10485760 } (pre-stream)
  * AC-5    : Unsupported MIME type → 415 { error: 'unsupported content_type', supported: [...] }
@@ -207,21 +207,37 @@ export function createUploadTicketHandler(
           return;
         }
 
-        // AC-2: Success — record ownership and return scan_id
-        const scanId = (body as Record<string, unknown>).scan_id as string;
+        // AC-2 (BL-280): forward full OCR response fields (not just scan_id).
+        // The PWA confirm screen reads extracted_fields directly from this response;
+        // stripping the OCR body caused confirm to show "No field data available."
+        const ocrBody = body as Record<string, unknown>;
+        const scanId = ocrBody.scan_id as string;
+
+        const forwardedResponse = {
+          scan_id: scanId,
+          status: ocrBody.status,
+          confidence: ocrBody.confidence,
+          extracted_fields: ocrBody.extracted_fields,
+          raw_text: ocrBody.raw_text,
+          missing_fields: ocrBody.missing_fields,
+          claim_ready: ocrBody.claim_ready,
+          ocr_status: ocrBody.ocr_status,
+          gcs_upload_status: ocrBody.gcs_upload_status,
+          image_gcs_path: ocrBody.image_gcs_path,
+        };
 
         recordScanOwnership(redis, scanId, session.user_id).then(() => {
           logger.info('uploadTicketHandler: scan submitted successfully', {
             component: 'web-app-bff/upload-ticket-handler',
           });
-          sendOnce(200, { scan_id: scanId });
+          sendOnce(200, forwardedResponse);
         }).catch((err: unknown) => {
           logger.warn('uploadTicketHandler: failed to record scan ownership', {
             component: 'web-app-bff/upload-ticket-handler',
             error: err instanceof Error ? err.message : String(err),
           });
-          // Still return the scan_id — ownership recording is best-effort for UX
-          sendOnce(200, { scan_id: scanId });
+          // Still return forwarded fields — ownership recording is best-effort for UX
+          sendOnce(200, forwardedResponse);
         });
       }).catch((err: unknown) => {
         logger.warn('uploadTicketHandler: ocr-service call failed', {
