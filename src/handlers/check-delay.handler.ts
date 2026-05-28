@@ -381,10 +381,13 @@ export function createCheckDelayHandler(): RequestHandler {
     // so the coordinator can call evaluate() with real data (not UNKNOWN/0 defaults).
     if (eeResult.statusCode === 404) {
       const rawBody = req.body as Record<string, unknown>;
-      const triggerPayload: { delay_minutes?: number; ticket_fare_pence?: number; toc_code?: string } = {
+      // BL-313 AC-3: source toc_code from delayBody (delay-tracker response), NOT req.body.
+      // The PWA does not send toc_code — it is only available from the delay-tracker response.
+      const delayBodyTocCode = (delayBody as Record<string, unknown>).toc_code;
+      const triggerPayload: { delay_minutes?: number; ticket_fare_pence?: number; toc_code?: string | null } = {
         delay_minutes: typeof delayBody.delay_minutes === 'number' ? delayBody.delay_minutes : undefined,
         ticket_fare_pence: typeof rawBody.ticket_fare_pence === 'number' ? rawBody.ticket_fare_pence : (typeof rawBody.fare_pence === 'number' ? rawBody.fare_pence : undefined),
-        toc_code: typeof rawBody.toc_code === 'string' ? rawBody.toc_code : undefined,
+        toc_code: (typeof delayBodyTocCode === 'string' || delayBodyTocCode === null) ? delayBodyTocCode : undefined,
       };
       Promise.resolve(triggerEvaluation(journeyId, correlationId, triggerPayload)).catch(() => {
         // non-fatal — poll will retry; coordinator errors must not affect the BFF response

@@ -144,7 +144,8 @@ export async function triggerEvaluation(
   triggerPayload?: {
     delay_minutes?: number;
     ticket_fare_pence?: number;
-    toc_code?: string;
+    // BL-313 AC-3: toc_code can be null (when delay-tracker returns null for unresolvable TOC)
+    toc_code?: string | null;
   }
 ): Promise<void> {
   const evaluationCoordinatorUrl = process.env.EVALUATION_COORDINATOR_URL ?? '';
