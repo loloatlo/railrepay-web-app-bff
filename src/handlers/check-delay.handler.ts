@@ -39,6 +39,7 @@ import { getRegistry, Counter, Histogram } from '@railrepay/metrics-pusher';
 import { matchJourney } from '../lib/journey-matcher-client.js';
 import { queryDelay } from '../lib/delay-tracker-client.js';
 import { getEligibility } from '../lib/eligibility-engine-client.js';
+import { triggerEvaluation } from '../lib/evaluation-coordinator-client.js';
 import type { RequestSession } from '../middleware/cookie-session.js';
 
 // ─── Logger (ADR-002 / CLAUDE.md §8) ─────────────────────────────────────────
@@ -372,7 +373,13 @@ export function createCheckDelayHandler(): RequestHandler {
     }
 
     // AC-8: eligibility-engine 404 → return delay data + status: 'pending_eligibility'
+    // BL-308 (ADR-028 Option A): fire-and-forget trigger to evaluation-coordinator
+    // so the evaluation starts immediately rather than waiting for the Kafka event.
+    // All trigger outcomes (202, 422, 5xx, network, missing env var) are NON-FATAL.
     if (eeResult.statusCode === 404) {
+      Promise.resolve(triggerEvaluation(journeyId, correlationId)).catch(() => {
+        // non-fatal — poll will retry; coordinator errors must not affect the BFF response
+      });
       logger.info('check-delay: eligibility-engine returned 404 (race — evaluation not yet run)', {
         component: 'web-app-bff/check-delay-handler',
         outcome: 'pending_eligibility',
