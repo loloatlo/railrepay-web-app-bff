@@ -376,8 +376,17 @@ export function createCheckDelayHandler(): RequestHandler {
     // BL-308 (ADR-028 Option A): fire-and-forget trigger to evaluation-coordinator
     // so the evaluation starts immediately rather than waiting for the Kafka event.
     // All trigger outcomes (202, 422, 5xx, network, missing env var) are NON-FATAL.
+    //
+    // BL-311 (ADR-029 Option A): forward delay_minutes + ticket_fare_pence + toc_code
+    // so the coordinator can call evaluate() with real data (not UNKNOWN/0 defaults).
     if (eeResult.statusCode === 404) {
-      Promise.resolve(triggerEvaluation(journeyId, correlationId)).catch(() => {
+      const rawBody = req.body as Record<string, unknown>;
+      const triggerPayload: { delay_minutes?: number; ticket_fare_pence?: number; toc_code?: string } = {
+        delay_minutes: typeof delayBody.delay_minutes === 'number' ? delayBody.delay_minutes : undefined,
+        ticket_fare_pence: typeof rawBody.ticket_fare_pence === 'number' ? rawBody.ticket_fare_pence : (typeof rawBody.fare_pence === 'number' ? rawBody.fare_pence : undefined),
+        toc_code: typeof rawBody.toc_code === 'string' ? rawBody.toc_code : undefined,
+      };
+      Promise.resolve(triggerEvaluation(journeyId, correlationId, triggerPayload)).catch(() => {
         // non-fatal — poll will retry; coordinator errors must not affect the BFF response
       });
       logger.info('check-delay: eligibility-engine returned 404 (race — evaluation not yet run)', {

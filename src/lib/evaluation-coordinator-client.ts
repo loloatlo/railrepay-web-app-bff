@@ -43,16 +43,27 @@ const logger = createLogger({
 /**
  * Minimal HTTP POST helper using Node's built-in http/https modules.
  * Uses http/https (not native fetch) so that nock can intercept in tests.
+ *
+ * @param url     Full URL to POST to
+ * @param headers Request headers (Content-Type, X-Correlation-ID, etc.)
+ * @param body    Optional JSON-serialisable request body (ADR-029 — trigger payload)
+ * @param signal  Optional AbortSignal for timeout
  */
 function httpPost<T>(
   url: string,
   headers: Record<string, string>,
+  body?: Record<string, unknown>,
   signal?: AbortSignal
 ): Promise<{ statusCode: number; body: T }> {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
     const isHttps = parsedUrl.protocol === 'https:';
     const transport = isHttps ? https : http;
+
+    const serializedBody = body !== undefined ? JSON.stringify(body) : undefined;
+    const contentLength = serializedBody !== undefined
+      ? Buffer.byteLength(serializedBody, 'utf8').toString()
+      : '0';
 
     const options = {
       hostname: parsedUrl.hostname,
@@ -61,7 +72,8 @@ function httpPost<T>(
       method: 'POST',
       headers: {
         ...headers,
-        'Content-Length': '0',
+        'Content-Type': 'application/json',
+        'Content-Length': contentLength,
       },
     };
 
@@ -90,6 +102,9 @@ function httpPost<T>(
       });
     }
 
+    if (serializedBody !== undefined) {
+      req.write(serializedBody, 'utf8');
+    }
     req.end();
   });
 }
@@ -120,10 +135,17 @@ function withTimeout<T>(
  *
  * @param journeyId     Journey UUID to trigger evaluation for
  * @param correlationId X-Correlation-ID to forward (AC-5)
+ * @param triggerPayload Optional body payload — delay_minutes, ticket_fare_pence, toc_code
+ *                       (ADR-029 Option A: BFF sends these so coordinator can call evaluate())
  */
 export async function triggerEvaluation(
   journeyId: string,
-  correlationId?: string
+  correlationId?: string,
+  triggerPayload?: {
+    delay_minutes?: number;
+    ticket_fare_pence?: number;
+    toc_code?: string;
+  }
 ): Promise<void> {
   const evaluationCoordinatorUrl = process.env.EVALUATION_COORDINATOR_URL ?? '';
 
@@ -138,10 +160,16 @@ export async function triggerEvaluation(
 
   const url = `${evaluationCoordinatorUrl}/evaluate/${journeyId}`;
 
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = {};
   if (correlationId) {
     headers['x-correlation-id'] = correlationId;
   }
+
+  // Build request body if trigger payload provided (ADR-029 Option A)
+  const requestBody: Record<string, unknown> | undefined =
+    triggerPayload !== undefined
+      ? { ...triggerPayload }
+      : undefined;
 
   logger.info('triggerEvaluation: firing POST to evaluation-coordinator', {
     component: 'web-app-bff/evaluation-coordinator-client',
@@ -153,6 +181,7 @@ export async function triggerEvaluation(
       httpPost<Record<string, unknown>>(
         url,
         headers,
+        requestBody,
         signal
       ),
     EVALUATION_COORDINATOR_TIMEOUT_MS
