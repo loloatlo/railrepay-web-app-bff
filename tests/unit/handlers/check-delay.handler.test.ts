@@ -2,8 +2,10 @@
  * Unit Tests: check-delay handler — POST /api/journeys/check-delay
  *
  * Story   : RAILREPAY-WEB-BFF-005
+ * Bug Fix : BL-308 — on-demand check-delay never triggers eligibility evaluation
  * Phase   : US-2 (Jessie — Test Specification, TDD per ADR-014)
- * Date    : 2026-05-12
+ *           T2-test (Jessie — BL-308 dispositive-RED + AC-1..5 non-fatal triggers)
+ * Date    : 2026-05-12 (original), 2026-05-28 (BL-308 additions)
  *
  * Test Lock Rule (CLAUDE.md §6): Blake MUST NOT modify these tests.
  * If a test appears wrong, hand back to Jessie with explanation.
@@ -13,11 +15,12 @@
  *   src/lib/journey-matcher-client.ts
  *   src/lib/delay-tracker-client.ts
  *   src/lib/eligibility-engine-client.ts
+ *   src/lib/evaluation-coordinator-client.ts  ← NEW (BL-308)
  *   src/routes/journeys.ts (mounts POST /api/journeys/check-delay)
  *
  * Failure reason: "Cannot find module" for all three client mocks.
  *
- * AC coverage map:
+ * AC coverage map (WEB-BFF-005 existing):
  *   AC-1:  Body validation — each required field missing → 400 with Zod field-level details
  *   AC-2:  No session → 401 { error: 'unauthorized' }
  *   AC-3:  Happy path matched + delayed → 200 flat composite with journey + delay + eligibility
@@ -36,10 +39,24 @@
  *   AC-14: Logging — structured log per request with outcome and upstream labels
  *   AC-15: Metrics — counter + histogram updated per outcome
  *
- * Mocked modules (all 3 clients mocked at module level):
+ * AC coverage map (BL-308 NEW — evaluation-coordinator trigger):
+ *   AC-1 (DISPOSITIVE): eligibility-engine 404 → handler calls triggerEvaluation ONCE with
+ *          correct journey_id, still returns 200 { status: 'pending_eligibility' }
+ *          THIS IS THE ROOT-CAUSE TEST. MUST FAIL on current code (no trigger call exists).
+ *   AC-2:  triggerEvaluation throws (coordinator 5xx/network) → handler STILL returns 200
+ *          pending_eligibility (trigger failures are NON-FATAL)
+ *   AC-3:  triggerEvaluation resolves with 422 dedup → handler STILL returns 200
+ *          pending_eligibility (422 is non-fatal success/dedup)
+ *   AC-4:  EVALUATION_COORDINATOR_URL unset → client warns, handler STILL returns 200
+ *          pending_eligibility (missing env var is NON-FATAL)
+ *   AC-5:  triggerEvaluation receives the REAL matched journey_id (from journey-matcher response)
+ *          AND the request correlationId (not the scan_id, not null/undefined)
+ *
+ * Mocked modules (all 4 clients mocked at module level):
  *   ../../src/lib/journey-matcher-client.js
  *   ../../src/lib/delay-tracker-client.js
  *   ../../src/lib/eligibility-engine-client.js
+ *   ../../src/lib/evaluation-coordinator-client.js  ← NEW (BL-308)
  *   @railrepay/winston-logger (shared mock instance per CLAUDE.md §6.1 #11)
  *   @railrepay/metrics-pusher (counter + histogram mocked)
  *
@@ -50,6 +67,7 @@
  *   ADR-002 — Structured logging with correlation IDs
  *   ADR-014 — TDD
  *   ADR-023 — Web Channel BFF Architecture
+ *   ADR-028 — On-demand evaluation trigger via evaluation-coordinator (BL-308)
  *   CLAUDE.md §6.1 — Test Specification Guidelines
  *   CLAUDE.md §8 — Mandatory shared package usage
  */
@@ -127,6 +145,13 @@ vi.mock('../../../src/lib/delay-tracker-client.js', () => ({
 const mockGetEligibility = vi.fn();
 vi.mock('../../../src/lib/eligibility-engine-client.js', () => ({
   getEligibility: (...args: unknown[]) => mockGetEligibility(...args),
+}));
+
+// BL-308: evaluation-coordinator-client mock
+// Module does NOT exist yet (TDD RED phase) — Blake creates it in T2-impl.
+const mockTriggerEvaluation = vi.fn();
+vi.mock('../../../src/lib/evaluation-coordinator-client.js', () => ({
+  triggerEvaluation: (...args: unknown[]) => mockTriggerEvaluation(...args),
 }));
 
 // ─── App factory — imports the handler under test ────────────────────────────
@@ -765,6 +790,237 @@ describe('RAILREPAY-WEB-BFF-005: check-delay handler unit tests', () => {
 
       expect(mockCounter.inc).toHaveBeenCalled();
       expect(mockHistogram.observe).toHaveBeenCalled();
+    });
+  });
+
+  // ─── BL-308: Evaluation-coordinator trigger (NEW) ─────────────────────────
+  //
+  // Root cause (Blake T1, 2026-05-28): when eligibility-engine returns 404 on
+  // an on-demand check-delay, the BFF returned pending_eligibility but NEVER
+  // fired POST /evaluate/:journeyId on the evaluation-coordinator. Consequence:
+  // the poll window exhausted without a verdict.
+  //
+  // Fix (ADR-028, Option A): on eligibility-engine 404, fire triggerEvaluation()
+  // fire-and-forget BEFORE returning 200 pending_eligibility. All trigger outcomes
+  // (202, 422 dedup, 5xx, network error, missing env var) MUST be NON-FATAL.
+
+  describe('BL-308: evaluation-coordinator trigger when eligibility-engine returns 404', () => {
+
+    // ── AC-1 (DISPOSITIVE) ──────────────────────────────────────────────────
+    //
+    // THIS IS THE ROOT-CAUSE TEST.
+    // It MUST FAIL on current code (no triggerEvaluation call exists in handler).
+    // Blake's GREEN must flip it by calling triggerEvaluation in the AC-8 branch.
+
+    describe('AC-1 (DISPOSITIVE-RED): handler calls triggerEvaluation on eligibility-engine 404', () => {
+      it('AC-1 DISPOSITIVE: should call triggerEvaluation ONCE with matched journey_id when eligibility-engine returns 404', async () => {
+        // DISPOSITIVE-RED: This test MUST FAIL on current handler code.
+        // Current handler returns 200 pending_eligibility WITHOUT calling triggerEvaluation.
+        // Blake's fix: add triggerEvaluation(journeyId, correlationId) (fire-and-forget)
+        // inside the eligibility-engine 404 branch BEFORE the res.status(200).json call.
+
+        mockMatchJourney.mockResolvedValueOnce({ statusCode: 200, body: JM_MATCH_RESPONSE_DELAYED });
+        mockQueryDelay.mockResolvedValueOnce({ statusCode: 200, body: DT_DELAYED_RESPONSE });
+        mockGetEligibility.mockResolvedValueOnce({ statusCode: 404, body: { error: 'Evaluation not found', journey_id: MATCHED_JOURNEY_ID } });
+        // triggerEvaluation resolves (fire-and-forget 202)
+        mockTriggerEvaluation.mockResolvedValueOnce(undefined);
+
+        const app = buildApp();
+        const res = await request(app)
+          .post('/api/journeys/check-delay')
+          .set('x-correlation-id', CORRELATION_ID_001)
+          .send(VALID_CHECK_DELAY_BODY);
+
+        // AC-1: Handler still returns 200 pending_eligibility (trigger is fire-and-forget)
+        expect(res.status).toBe(200);
+        expect(res.body.status).toBe('pending_eligibility');
+        expect(res.body.matched).toBe(true);
+        expect(res.body.journey_id).toBe(MATCHED_JOURNEY_ID);
+        // AC-1: Delay data still present (not dropped by trigger path)
+        expect(res.body.delay_minutes).toBe(23);
+
+        // AC-1 DISPOSITIVE ASSERTION: triggerEvaluation MUST have been called EXACTLY ONCE
+        // This is the assertion that FAILS on current code (current code never calls it).
+        expect(mockTriggerEvaluation).toHaveBeenCalledOnce();
+      });
+
+      it('AC-1: triggerEvaluation should NOT be called when eligibility-engine returns 200 (happy path)', async () => {
+        // AC-1 boundary: trigger is ONLY fired on 404, not on successful eligibility response
+        mockMatchJourney.mockResolvedValueOnce({ statusCode: 200, body: JM_MATCH_RESPONSE_DELAYED });
+        mockQueryDelay.mockResolvedValueOnce({ statusCode: 200, body: DT_DELAYED_RESPONSE });
+        mockGetEligibility.mockResolvedValueOnce({ statusCode: 200, body: EE_ELIGIBLE_RESPONSE });
+
+        const app = buildApp();
+        await request(app)
+          .post('/api/journeys/check-delay')
+          .set('x-correlation-id', CORRELATION_ID_001)
+          .send(VALID_CHECK_DELAY_BODY);
+
+        // AC-1: MUST NOT trigger evaluation when eligibility-engine already has a result
+        expect(mockTriggerEvaluation).not.toHaveBeenCalled();
+      });
+
+      it('AC-1: triggerEvaluation should NOT be called when delay-tracker returns 404 (pending step)', async () => {
+        // AC-1 boundary: trigger only fires when delay IS available but eligibility is missing
+        mockMatchJourney.mockResolvedValueOnce({ statusCode: 200, body: JM_MATCH_RESPONSE_DELAYED });
+        mockQueryDelay.mockResolvedValueOnce({ statusCode: 404, body: { error: 'unknown_journey' } });
+
+        const app = buildApp();
+        await request(app)
+          .post('/api/journeys/check-delay')
+          .set('x-correlation-id', CORRELATION_ID_001)
+          .send(VALID_CHECK_DELAY_BODY);
+
+        // AC-1: MUST NOT trigger evaluation when delay data is not yet available
+        expect(mockTriggerEvaluation).not.toHaveBeenCalled();
+      });
+    });
+
+    // ── AC-5: correct journey_id and correlationId forwarded ────────────────
+
+    describe('AC-5: triggerEvaluation receives the REAL matched journey_id and request correlationId', () => {
+      it('AC-5: should call triggerEvaluation with journey_id from journey-matcher (not scan_id, not null)', async () => {
+        // AC-5: journey_id must come from the journey-matcher response, not the request body's scan_id
+        mockMatchJourney.mockResolvedValueOnce({ statusCode: 200, body: JM_MATCH_RESPONSE_DELAYED });
+        mockQueryDelay.mockResolvedValueOnce({ statusCode: 200, body: DT_DELAYED_RESPONSE });
+        mockGetEligibility.mockResolvedValueOnce({ statusCode: 404, body: { error: 'Evaluation not found', journey_id: MATCHED_JOURNEY_ID } });
+        mockTriggerEvaluation.mockResolvedValueOnce(undefined);
+
+        const app = buildApp();
+        await request(app)
+          .post('/api/journeys/check-delay')
+          .set('x-correlation-id', CORRELATION_ID_001)
+          .send(VALID_CHECK_DELAY_BODY);
+
+        // AC-5: First argument must be the REAL journey_id (MATCHED_JOURNEY_ID)
+        expect(mockTriggerEvaluation).toHaveBeenCalledOnce();
+        const [calledJourneyId, calledCorrelationId] = mockTriggerEvaluation.mock.calls[0] as [string, string | undefined];
+        expect(calledJourneyId).toBe(MATCHED_JOURNEY_ID);
+
+        // AC-5: Second argument must be the request correlationId (x-correlation-id header)
+        expect(calledCorrelationId).toBe(CORRELATION_ID_001);
+      });
+
+      it('AC-5: different journeyIds (from different journey-matcher responses) are forwarded correctly', async () => {
+        // AC-5: triggerEvaluation must receive the journey_id from THIS request, not a stale one
+        mockMatchJourney.mockResolvedValueOnce({ statusCode: 200, body: JM_MATCH_RESPONSE_ON_TIME });
+        mockQueryDelay.mockResolvedValueOnce({ statusCode: 200, body: DT_ON_TIME_RESPONSE });
+        mockGetEligibility.mockResolvedValueOnce({ statusCode: 404, body: { error: 'Evaluation not found', journey_id: SECOND_JOURNEY_ID } });
+        mockTriggerEvaluation.mockResolvedValueOnce(undefined);
+
+        const app = buildApp();
+        await request(app)
+          .post('/api/journeys/check-delay')
+          .set('x-correlation-id', CORRELATION_ID_002)
+          .send(VALID_CHECK_DELAY_BODY_RETURN);
+
+        expect(mockTriggerEvaluation).toHaveBeenCalledOnce();
+        const [calledJourneyId, calledCorrelationId] = mockTriggerEvaluation.mock.calls[0] as [string, string | undefined];
+        // AC-5: Must receive SECOND_JOURNEY_ID (from JM_MATCH_RESPONSE_ON_TIME), not MATCHED_JOURNEY_ID
+        expect(calledJourneyId).toBe(SECOND_JOURNEY_ID);
+        // AC-5: Must receive CORRELATION_ID_002 from this request's header
+        expect(calledCorrelationId).toBe(CORRELATION_ID_002);
+      });
+    });
+
+    // ── AC-2: trigger failure (5xx / network) is NON-FATAL ───────────────────
+
+    describe('AC-2: triggerEvaluation throws (coordinator 5xx/network) → handler still returns 200 pending_eligibility', () => {
+      it('AC-2: handler returns 200 pending_eligibility even when triggerEvaluation throws (5xx)', async () => {
+        // AC-2: Coordinator 5xx must NOT propagate into handler response
+        // ADR-028: "All trigger outcomes MUST be NON-FATAL"
+        mockMatchJourney.mockResolvedValueOnce({ statusCode: 200, body: JM_MATCH_RESPONSE_DELAYED });
+        mockQueryDelay.mockResolvedValueOnce({ statusCode: 200, body: DT_DELAYED_RESPONSE });
+        mockGetEligibility.mockResolvedValueOnce({ statusCode: 404, body: { error: 'Evaluation not found', journey_id: MATCHED_JOURNEY_ID } });
+        // Simulate coordinator returning 5xx → client throws
+        mockTriggerEvaluation.mockRejectedValueOnce(new Error('coordinator_unavailable'));
+
+        const app = buildApp();
+        const res = await request(app)
+          .post('/api/journeys/check-delay')
+          .set('x-correlation-id', CORRELATION_ID_001)
+          .send(VALID_CHECK_DELAY_BODY);
+
+        // AC-2: MUST NOT return 500 or 503 — trigger failure is non-fatal
+        expect(res.status).toBe(200);
+        expect(res.body.status).toBe('pending_eligibility');
+        expect(res.body.matched).toBe(true);
+      });
+
+      it('AC-2: handler returns 200 pending_eligibility even when triggerEvaluation throws (network error)', async () => {
+        // AC-2: Network error (coordinator unreachable) must NOT propagate
+        mockMatchJourney.mockResolvedValueOnce({ statusCode: 200, body: JM_MATCH_RESPONSE_DELAYED });
+        mockQueryDelay.mockResolvedValueOnce({ statusCode: 200, body: DT_DELAYED_RESPONSE });
+        mockGetEligibility.mockResolvedValueOnce({ statusCode: 404, body: { error: 'Evaluation not found', journey_id: MATCHED_JOURNEY_ID } });
+        mockTriggerEvaluation.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+        const app = buildApp();
+        const res = await request(app)
+          .post('/api/journeys/check-delay')
+          .set('x-correlation-id', CORRELATION_ID_001)
+          .send(VALID_CHECK_DELAY_BODY);
+
+        expect(res.status).toBe(200);
+        expect(res.body.status).toBe('pending_eligibility');
+      });
+    });
+
+    // ── AC-3: 422 dedup is NON-FATAL ────────────────────────────────────────
+
+    describe('AC-3: triggerEvaluation resolves with 422 dedup → handler still returns 200 pending_eligibility', () => {
+      it('AC-3: handler returns 200 pending_eligibility when triggerEvaluation resolves (422 dedup case)', async () => {
+        // AC-3: 422 from coordinator = evaluation already in flight
+        // Client resolves (not throws) on 422; handler must still return pending_eligibility
+        mockMatchJourney.mockResolvedValueOnce({ statusCode: 200, body: JM_MATCH_RESPONSE_DELAYED });
+        mockQueryDelay.mockResolvedValueOnce({ statusCode: 200, body: DT_DELAYED_RESPONSE });
+        mockGetEligibility.mockResolvedValueOnce({ statusCode: 404, body: { error: 'Evaluation not found', journey_id: MATCHED_JOURNEY_ID } });
+        // 422 dedup: client resolves (non-throwing) per AC-3 on evaluation-coordinator-client
+        mockTriggerEvaluation.mockResolvedValueOnce(undefined);
+
+        const app = buildApp();
+        const res = await request(app)
+          .post('/api/journeys/check-delay')
+          .set('x-correlation-id', CORRELATION_ID_001)
+          .send(VALID_CHECK_DELAY_BODY);
+
+        expect(res.status).toBe(200);
+        expect(res.body.status).toBe('pending_eligibility');
+        // AC-3: triggerEvaluation was still called (even if it deduped)
+        expect(mockTriggerEvaluation).toHaveBeenCalledOnce();
+      });
+    });
+
+    // ── AC-4: missing EVALUATION_COORDINATOR_URL is NON-FATAL ───────────────
+
+    describe('AC-4: EVALUATION_COORDINATOR_URL unset → handler still returns 200 pending_eligibility', () => {
+      it('AC-4: handler returns 200 pending_eligibility when EVALUATION_COORDINATOR_URL is not set', async () => {
+        // AC-4: Missing env var must NOT crash the handler
+        // Blake's env-var testing pattern (CLAUDE.md §6.2): delete env var in test
+        const originalUrl = process.env.EVALUATION_COORDINATOR_URL;
+        delete process.env.EVALUATION_COORDINATOR_URL;
+
+        // Client warns and resolves (no throw) when URL is missing (per client AC-4)
+        mockMatchJourney.mockResolvedValueOnce({ statusCode: 200, body: JM_MATCH_RESPONSE_DELAYED });
+        mockQueryDelay.mockResolvedValueOnce({ statusCode: 200, body: DT_DELAYED_RESPONSE });
+        mockGetEligibility.mockResolvedValueOnce({ statusCode: 404, body: { error: 'Evaluation not found', journey_id: MATCHED_JOURNEY_ID } });
+        // When env var missing: client warns and resolves (non-throwing)
+        mockTriggerEvaluation.mockResolvedValueOnce(undefined);
+
+        const app = buildApp();
+        const res = await request(app)
+          .post('/api/journeys/check-delay')
+          .set('x-correlation-id', CORRELATION_ID_001)
+          .send(VALID_CHECK_DELAY_BODY);
+
+        // AC-4: MUST return 200 pending_eligibility regardless of missing env var
+        expect(res.status).toBe(200);
+        expect(res.body.status).toBe('pending_eligibility');
+
+        // Restore
+        if (originalUrl !== undefined) {
+          process.env.EVALUATION_COORDINATOR_URL = originalUrl;
+        }
+      });
     });
   });
 });
