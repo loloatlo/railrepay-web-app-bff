@@ -267,6 +267,23 @@ export function createCheckDelayHandler(): RequestHandler {
       return;
     }
 
+    // T2 Defect B secondary (BL-315): guard journey-matcher 4xx.
+    // A 4xx from the matcher (e.g. actual_departure_time not HH:MM) must not fall through
+    // to the candidates/no_match branches, which would dereference undefined journey_id
+    // and call delay-tracker with undefined. Return 400 immediately.
+    if (jmResult.statusCode >= 400 && jmResult.statusCode < 500) {
+      logger.warn('check-delay: journey-matcher returned 4xx — validation error', {
+        component: 'web-app-bff/check-delay-handler',
+        outcome: 'matcher_validation_error',
+        statusCode: jmResult.statusCode,
+        correlationId,
+      });
+      getCounter().inc({ outcome: 'matcher_validation_error' });
+      getHistogram().observe((Date.now() - startMs) / 1000);
+      res.status(400).json({ error: 'validation_error', service: 'journey-matcher' });
+      return;
+    }
+
     // JM-002: candidates path — any-permitted no-attestation → pass through candidate list (AC-7)
     // Does NOT proceed to delay-tracker or eligibility-engine.
     if (jmResult.body.status === 'candidates') {
