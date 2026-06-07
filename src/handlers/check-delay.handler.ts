@@ -87,6 +87,10 @@ interface CheckDelayBody {
   departure_time: string;
   journey_type?: 'single' | 'return';
   scan_id?: string;
+  // JM-002: Anytime/Any-Permitted ticket attestation fields (AC-7)
+  ticket_type?: string;
+  actual_departure_time?: string;
+  actual_rid?: string;
 }
 
 /** Validation issue for a single field */
@@ -152,6 +156,10 @@ function validateCheckDelayBody(raw: unknown): { data: CheckDelayBody } | { issu
       departure_time: obj.departure_time as string,
       ...(obj.journey_type !== undefined ? { journey_type: obj.journey_type as 'single' | 'return' } : {}),
       ...(obj.scan_id !== undefined ? { scan_id: obj.scan_id as string } : {}),
+      // JM-002: Attestation fields — pass through when present (AC-7)
+      ...(obj.ticket_type !== undefined ? { ticket_type: obj.ticket_type as string } : {}),
+      ...(obj.actual_departure_time !== undefined ? { actual_departure_time: obj.actual_departure_time as string } : {}),
+      ...(obj.actual_rid !== undefined ? { actual_rid: obj.actual_rid as string } : {}),
     },
   };
 }
@@ -172,7 +180,7 @@ export function createCheckDelayHandler(): RequestHandler {
     res: Response
   ): Promise<void> {
     const startMs = Date.now();
-    const correlationId = req.headers['x-correlation-id'] as string | undefined;
+    const correlationId = (req.headers['x-correlation-id'] as string | undefined) ?? crypto.randomUUID();
 
     // ── AC-2: Authentication ──────────────────────────────────────────────────
     const session = (req as Request & { session?: RequestSession }).session;
@@ -222,6 +230,11 @@ export function createCheckDelayHandler(): RequestHandler {
           departure_time: body.departure_time,
           ...(body.journey_type !== undefined ? { journey_type: body.journey_type } : {}),
           ...(body.scan_id !== undefined ? { scan_id: body.scan_id } : {}),
+          // JM-002: Forward attestation fields explicitly (AC-7 / ADR-027)
+          // ticket_type from body wins; scan_id→OCR fallback is downstream JM concern.
+          ...(body.ticket_type !== undefined ? { ticket_type: body.ticket_type } : {}),
+          ...(body.actual_departure_time !== undefined ? { actual_departure_time: body.actual_departure_time } : {}),
+          ...(body.actual_rid !== undefined ? { actual_rid: body.actual_rid } : {}),
         },
         correlationId
       );
@@ -251,6 +264,20 @@ export function createCheckDelayHandler(): RequestHandler {
       getCounter().inc({ outcome: 'upstream_unavailable' });
       getHistogram().observe((Date.now() - startMs) / 1000);
       res.status(503).json({ error: 'upstream_unavailable', service: 'journey-matcher' });
+      return;
+    }
+
+    // JM-002: candidates path — any-permitted no-attestation → pass through candidate list (AC-7)
+    // Does NOT proceed to delay-tracker or eligibility-engine.
+    if (jmResult.body.status === 'candidates') {
+      logger.info('check-delay: journey-matcher returned candidates (anytime, no attestation)', {
+        component: 'web-app-bff/check-delay-handler',
+        outcome: 'candidates',
+        correlationId,
+      });
+      getCounter().inc({ outcome: 'candidates' });
+      getHistogram().observe((Date.now() - startMs) / 1000);
+      res.status(200).json(jmResult.body);
       return;
     }
 

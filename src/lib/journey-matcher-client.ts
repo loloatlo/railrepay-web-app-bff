@@ -118,6 +118,10 @@ export interface MatchJourneyInput {
   departure_time: string;
   journey_type?: string;
   scan_id?: string;
+  // JM-002: Anytime/Any-Permitted ticket attestation fields (AC-7)
+  ticket_type?: string;
+  actual_departure_time?: string;
+  actual_rid?: string;
 }
 
 /**
