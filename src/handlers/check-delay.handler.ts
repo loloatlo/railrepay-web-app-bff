@@ -37,7 +37,7 @@ import { type RequestHandler, type Request, type Response } from 'express';
 import { createLogger } from '@railrepay/winston-logger';
 import { getRegistry, Counter, Histogram } from '@railrepay/metrics-pusher';
 import { matchJourney } from '../lib/journey-matcher-client.js';
-import { queryDelay } from '../lib/delay-tracker-client.js';
+import { queryDelay, ensureDelay } from '../lib/delay-tracker-client.js';
 import { getEligibility } from '../lib/eligibility-engine-client.js';
 import { triggerEvaluation } from '../lib/evaluation-coordinator-client.js';
 import type { RequestSession } from '../middleware/cookie-session.js';
@@ -363,20 +363,160 @@ export function createCheckDelayHandler(): RequestHandler {
       return;
     }
 
-    // AC-7: delay-tracker 404 → 200 { status: 'pending' }, do NOT call eligibility-engine
+    // ADR-031: delay-tracker 404 → call POST /delays/ensure synchronously (not pending)
+    // AC-6 (ADR-031): On 404, call ensureDelay() instead of immediately returning pending.
+    // The ensure endpoint runs a synchronous Darwin evaluation and returns a TERMINAL response.
+    // AC-8 (ADR-031): When GET succeeds (200), ensureDelay is NOT called.
     if (dtResult.statusCode === 404) {
-      logger.info('check-delay: delay-tracker returned 404 (race — delay not yet available)', {
+      logger.info('check-delay: delay-tracker returned 404 — calling ensureDelay (ADR-031)', {
         component: 'web-app-bff/check-delay-handler',
-        outcome: 'pending',
+        outcome: 'ensure_triggered',
         correlationId,
       });
-      getCounter().inc({ outcome: 'pending' });
+
+      // AC-6: call ensureDelay — use matched journey_id and user_id from session
+      let ensureResult: { statusCode: number; body: Record<string, unknown> };
+      try {
+        ensureResult = await ensureDelay(journeyId, userId, correlationId);
+      } catch {
+        logger.warn('check-delay: ensureDelay threw unexpectedly', {
+          component: 'web-app-bff/check-delay-handler',
+          outcome: 'upstream_unavailable',
+          service: 'delay-tracker-ensure',
+          correlationId,
+        });
+        getCounter().inc({ outcome: 'upstream_unavailable' });
+        getHistogram().observe((Date.now() - startMs) / 1000);
+        res.status(503).json({ error: 'upstream_unavailable', service: 'delay-tracker' });
+        return;
+      }
+
+      // Propagate upstream errors from ensure (503 etc.)
+      if (ensureResult.statusCode >= 500) {
+        logger.warn('check-delay: ensureDelay returned 5xx', {
+          component: 'web-app-bff/check-delay-handler',
+          outcome: 'upstream_unavailable',
+          service: 'delay-tracker-ensure',
+          statusCode: ensureResult.statusCode,
+          correlationId,
+        });
+        getCounter().inc({ outcome: 'upstream_unavailable' });
+        getHistogram().observe((Date.now() - startMs) / 1000);
+        res.status(503).json({ error: 'upstream_unavailable', service: 'delay-tracker' });
+        return;
+      }
+
+      const ensureBody = ensureResult.body;
+      const ensureStatus = ensureBody.status as string;
+
+      // AC-7: fold terminal answers
+      if (ensureStatus === 'delayed' || ensureStatus === 'cancelled') {
+        // 'delayed' → proceed to eligibility trigger (same as existing GET-delayed path)
+        // Override dtResult and fall through to eligibility handling.
+        // body typed as Record<string,unknown> to allow property access (e.g. toc_code,
+        // delay_minutes, cancelled, last_observed_at) without TS narrowing it to the
+        // literal intersection of the spread keys.
+        const dtResultFromEnsure: { statusCode: number; body: Record<string, unknown> } = {
+          statusCode: 200,
+          body: {
+            ...ensureBody,
+            journey_id: journeyId,
+            status: ensureStatus,
+          },
+        };
+
+        // Step 3: eligibility-engine (same as the normal GET-success path)
+        let eeResult: { statusCode: number; body: Record<string, unknown> };
+        try {
+          eeResult = await getEligibility(journeyId, correlationId);
+        } catch {
+          logger.warn('check-delay: eligibility-engine threw (after ensure delayed)', {
+            component: 'web-app-bff/check-delay-handler',
+            outcome: 'upstream_unavailable',
+            service: 'eligibility-engine',
+            correlationId,
+          });
+          getCounter().inc({ outcome: 'upstream_unavailable' });
+          getHistogram().observe((Date.now() - startMs) / 1000);
+          res.status(503).json({ error: 'upstream_unavailable', service: 'eligibility-engine' });
+          return;
+        }
+
+        if (eeResult.statusCode >= 500) {
+          getCounter().inc({ outcome: 'upstream_unavailable' });
+          getHistogram().observe((Date.now() - startMs) / 1000);
+          res.status(503).json({ error: 'upstream_unavailable', service: 'eligibility-engine' });
+          return;
+        }
+
+        if (eeResult.statusCode === 404) {
+          const rawBody = req.body as Record<string, unknown>;
+          const delayBodyTocCode = dtResultFromEnsure.body.toc_code;
+          const triggerPayload: { delay_minutes?: number; ticket_fare_pence?: number; toc_code?: string | null } = {
+            delay_minutes: typeof dtResultFromEnsure.body.delay_minutes === 'number' ? dtResultFromEnsure.body.delay_minutes : undefined,
+            ticket_fare_pence: typeof rawBody.ticket_fare_pence === 'number' ? rawBody.ticket_fare_pence : (typeof rawBody.fare_pence === 'number' ? rawBody.fare_pence : undefined),
+            toc_code: (typeof delayBodyTocCode === 'string' || delayBodyTocCode === null) ? delayBodyTocCode : undefined,
+          };
+          Promise.resolve(triggerEvaluation(journeyId, correlationId, triggerPayload)).catch(() => {});
+          logger.info('check-delay: eligibility-engine 404 after ensure (pending_eligibility)', {
+            component: 'web-app-bff/check-delay-handler',
+            outcome: 'pending_eligibility',
+            correlationId,
+          });
+          getCounter().inc({ outcome: 'pending_eligibility' });
+          getHistogram().observe((Date.now() - startMs) / 1000);
+          res.status(200).json({
+            matched: true,
+            journey_id: journeyId,
+            delay_minutes: dtResultFromEnsure.body.delay_minutes,
+            cancelled: dtResultFromEnsure.body.cancelled,
+            last_observed_at: dtResultFromEnsure.body.last_observed_at,
+            status: 'pending_eligibility',
+            message: 'eligibility evaluation not yet available — check back shortly',
+          });
+          return;
+        }
+
+        // Full composite from ensure + eligibility
+        const eeBody = eeResult.body;
+        logger.info('check-delay: full composite from ensure path', {
+          component: 'web-app-bff/check-delay-handler',
+          outcome: ensureStatus,
+          correlationId,
+        });
+        getCounter().inc({ outcome: ensureStatus });
+        getHistogram().observe((Date.now() - startMs) / 1000);
+        res.status(200).json({
+          matched: true,
+          journey_id: journeyId,
+          delay_minutes: dtResultFromEnsure.body.delay_minutes,
+          cancelled: dtResultFromEnsure.body.cancelled,
+          last_observed_at: dtResultFromEnsure.body.last_observed_at,
+          status: ensureStatus,
+          eligible: eeBody.eligible,
+          scheme: eeBody.scheme,
+          compensation_percentage: eeBody.compensation_percentage,
+          compensation_pence: eeBody.compensation_pence,
+          ticket_fare_pence: eeBody.ticket_fare_pence,
+          reasons: eeBody.reasons,
+          applied_rules: eeBody.applied_rules,
+          evaluation_timestamp: eeBody.evaluation_timestamp,
+        });
+        return;
+      }
+
+      // AC-7: on_time | no_data → terminal verdict, NOT pending
+      logger.info('check-delay: ensure returned terminal non-delayed verdict', {
+        component: 'web-app-bff/check-delay-handler',
+        outcome: ensureStatus,
+        correlationId,
+      });
+      getCounter().inc({ outcome: ensureStatus ?? 'no_data' });
       getHistogram().observe((Date.now() - startMs) / 1000);
       res.status(200).json({
         matched: true,
         journey_id: journeyId,
-        status: 'pending',
-        message: 'delay data not yet available — check back shortly',
+        status: ensureStatus ?? 'no_data',
       });
       return;
     }

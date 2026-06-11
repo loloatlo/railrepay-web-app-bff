@@ -29,6 +29,13 @@ import { createLogger } from '@railrepay/winston-logger';
 /** Outbound HTTP timeout — 2 s (locked in WEB-BFF-005 spec) */
 export const DELAY_TRACKER_TIMEOUT_MS = 2000;
 
+/**
+ * Ensure-endpoint timeout — 10 s (ADR-031).
+ * The ensure call runs a synchronous Darwin evaluation (~5-15 s), so it
+ * needs a generous budget. MUST NOT reuse DELAY_TRACKER_TIMEOUT_MS (AC-9).
+ */
+export const ENSURE_TIMEOUT_MS = 10000;
+
 const logger = createLogger({
   serviceName: process.env.SERVICE_NAME ?? 'web-app-bff',
   level: process.env.LOG_LEVEL ?? 'info',
@@ -99,6 +106,63 @@ function withTimeout<T>(
 }
 
 /**
+ * Minimal HTTP POST helper using Node's built-in http/https modules.
+ * Uses http/https (not native fetch) so that nock can intercept in tests.
+ */
+function httpPost<T>(
+  url: string,
+  body: Record<string, unknown>,
+  headers: Record<string, string>,
+  signal?: AbortSignal
+): Promise<{ statusCode: number; body: T }> {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(url);
+    const isHttps = parsedUrl.protocol === 'https:';
+    const transport = isHttps ? https : http;
+    const bodyStr = JSON.stringify(body);
+
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (isHttps ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Content-Length': Buffer.byteLength(bodyStr).toString(),
+      },
+    };
+
+    const req = transport.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+      res.on('end', () => {
+        try {
+          const parsed = data ? (JSON.parse(data) as T) : ({} as T);
+          resolve({ statusCode: res.statusCode ?? 0, body: parsed });
+        } catch {
+          resolve({ statusCode: res.statusCode ?? 0, body: {} as T });
+        }
+      });
+    });
+
+    req.on('error', reject);
+
+    if (signal) {
+      if (signal.aborted) {
+        req.destroy(new Error('AbortError'));
+        return;
+      }
+      signal.addEventListener('abort', () => {
+        req.destroy(new Error('AbortError'));
+      });
+    }
+
+    req.write(bodyStr);
+    req.end();
+  });
+}
+
+/**
  * Call GET /delays/:journey_id?user_id=<uuid> on delay-tracker service.
  * Returns { statusCode, body } for the handler to interpret.
  * Wrapped with 2 s AbortController timeout (AC-10).
@@ -137,6 +201,69 @@ export async function queryDelay(
     return { statusCode, body };
   } catch (err) {
     logger.warn('queryDelay: request failed or timed out', {
+      component: 'web-app-bff/delay-tracker-client',
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { statusCode: 503, body: { error: 'upstream_unavailable' } };
+  }
+}
+
+/**
+ * Call POST /delays/ensure on delay-tracker service (ADR-031).
+ *
+ * Triggers a synchronous delay evaluation on the delay-tracker side and
+ * returns a TERMINAL response: delayed | on_time | no_data. NEVER 'pending'.
+ *
+ * Uses ENSURE_TIMEOUT_MS (10 s) — a longer budget than the 2 s GET timeout
+ * because the ensure call runs a synchronous Darwin evaluation (~5-15 s).
+ *
+ * AC-9: ENSURE_TIMEOUT_MS is distinct from DELAY_TRACKER_TIMEOUT_MS.
+ * AC-13 (ADR-002): correlationId is forwarded via X-Correlation-ID.
+ *
+ * @param journeyId      Journey UUID
+ * @param userId         User UUID (from session)
+ * @param correlationId  X-Correlation-ID to forward
+ * @param journeyContext Additional journey context for Darwin evaluation
+ */
+export async function ensureDelay(
+  journeyId: string,
+  userId: string,
+  correlationId?: string,
+  journeyContext?: Record<string, unknown>
+): Promise<{ statusCode: number; body: Record<string, unknown> }> {
+  const delayTrackerUrl = process.env.DELAY_TRACKER_URL ?? '';
+  const url = `${delayTrackerUrl}/delays/ensure`;
+
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (correlationId) {
+    headers['x-correlation-id'] = correlationId;
+  }
+
+  const requestBody: Record<string, unknown> = {
+    journey_id: journeyId,
+    user_id: userId,
+    ...journeyContext,
+  };
+
+  logger.info('ensureDelay: calling delay-tracker ensure endpoint', {
+    component: 'web-app-bff/delay-tracker-client',
+    journey_id: journeyId,
+  });
+
+  try {
+    const { statusCode, body } = await withTimeout<{ statusCode: number; body: Record<string, unknown> }>(
+      (signal) =>
+        httpPost<Record<string, unknown>>(
+          url,
+          requestBody,
+          headers,
+          signal
+        ),
+      ENSURE_TIMEOUT_MS
+    );
+    return { statusCode, body };
+  } catch (err) {
+    logger.warn('ensureDelay: request failed or timed out', {
       component: 'web-app-bff/delay-tracker-client',
       error: err instanceof Error ? err.message : String(err),
     });
