@@ -28,8 +28,8 @@
  *   AC-5:  Happy path matched + cancelled → 200 with status='cancelled', cancelled=true, eligibility
  *   AC-6:  No-match path → 200 { matched: false, journey_id: null, reason, detail? }
  *          Does NOT call delay-tracker or eligibility-engine
- *   AC-7:  Matched + delay-tracker 404 (race) → 200 { status: 'pending' }
- *          Does NOT call eligibility-engine
+ *   AC-7:  Matched + delay-tracker 404 → ADR-031: BFF calls ensureDelay() → terminal
+ *          verdict (never 'pending'); 503 on ensure failure (RECONCILED 2026-06-11)
  *   AC-8:  Matched + delay-tracker OK + eligibility-engine 404 (race) →
  *          200 with delay data present, status: 'pending_eligibility' (or similar)
  *   AC-9:  journey-matcher 503/timeout → 503 { error: 'upstream_unavailable', service: 'journey-matcher' }
@@ -138,8 +138,12 @@ vi.mock('../../../src/lib/journey-matcher-client.js', () => ({
 }));
 
 const mockQueryDelay = vi.fn();
+const mockEnsureDelay = vi.fn();
 vi.mock('../../../src/lib/delay-tracker-client.js', () => ({
   queryDelay: (...args: unknown[]) => mockQueryDelay(...args),
+  // ADR-031: ensureDelay is called on 404 path; must be present in mock
+  // so the handler can import and invoke it without TypeError
+  ensureDelay: (...args: unknown[]) => mockEnsureDelay(...args),
 }));
 
 const mockGetEligibility = vi.fn();
@@ -487,13 +491,34 @@ describe('RAILREPAY-WEB-BFF-005: check-delay handler unit tests', () => {
     });
   });
 
-  // ─── AC-7: Eventual consistency — delay-tracker 404 ─────────────────────
+  // ─── AC-7: ADR-031 ensure-on-404 — delay-tracker 404 triggers ensureDelay ──
+  //
+  // RECONCILED 2026-06-11 (Jessie self-fix per Test Lock Rule procedure):
+  // The original AC-7 tested the OLD behavior: 404 → 200 { status: 'pending' }.
+  // ADR-031 (BL-315) SUPERSEDES this: 404 now triggers ensureDelay() and returns
+  // a TERMINAL verdict (never 'pending'). The dedicated ADR-031 test file
+  // (ADR-031-ensure-on-404.handler.test.ts) covers the new path exhaustively.
+  // This test is updated to assert the NEW ADR-031 behavior so this file stays
+  // coherent with the actual handler implementation.
 
-  describe('AC-7: Eventual consistency — delay-tracker 404 after match (race condition)', () => {
-    it('should return 200 { status: "pending" } and NOT call eligibility-engine when delay-tracker returns 404', async () => {
-      // AC-7: journey-matcher matches but delay-tracker hasn't ingested yet
+  describe('AC-7 (ADR-031): delay-tracker 404 → BFF calls ensureDelay + returns terminal verdict', () => {
+    it('should call ensureDelay and NOT return status:pending when delay-tracker returns 404 (ADR-031)', async () => {
+      // ADR-031 replaces the old 404→pending path.
+      // On 404: handler calls ensureDelay(); terminal response (delayed/on_time/no_data).
       mockMatchJourney.mockResolvedValueOnce({ statusCode: 200, body: JM_MATCH_RESPONSE_DELAYED });
       mockQueryDelay.mockResolvedValueOnce({ statusCode: 404, body: { error: 'unknown_journey' } });
+      // ensureDelay returns a terminal result — delayed in this case
+      mockEnsureDelay.mockResolvedValueOnce({
+        statusCode: 200,
+        body: {
+          status: 'delayed',
+          delay_minutes: 23,
+          cancelled: false,
+          toc_code: 'GR',
+          last_observed_at: '2026-06-03T10:47:00.000Z',
+        },
+      });
+      mockGetEligibility.mockResolvedValueOnce({ statusCode: 200, body: EE_ELIGIBLE_RESPONSE });
 
       const app = buildApp();
       const res = await request(app)
@@ -504,16 +529,34 @@ describe('RAILREPAY-WEB-BFF-005: check-delay handler unit tests', () => {
       expect(res.status).toBe(200);
       expect(res.body.matched).toBe(true);
       expect(res.body.journey_id).toBe(MATCHED_JOURNEY_ID);
-      expect(res.body.status).toBe('pending');
-      expect(res.body.message).toBeDefined();
-      expect(typeof res.body.message).toBe('string');
-      expect(res.body.message.length).toBeGreaterThan(0);
 
-      // AC-7: MUST NOT call eligibility-engine when delay-tracker returns 404
-      expect(mockGetEligibility).not.toHaveBeenCalled();
+      // ADR-031: MUST NOT return 'pending' — ensure returns a terminal verdict
+      expect(res.body.status).not.toBe('pending');
 
-      // AC-7: delay-tracker WAS called (we just got 404 from it)
+      // ADR-031: ensureDelay MUST have been called on the 404 path
+      expect(mockEnsureDelay).toHaveBeenCalledTimes(1);
+
+      // AC-7 (original): queryDelay WAS called (we just got 404 from it)
       expect(mockQueryDelay).toHaveBeenCalledOnce();
+    });
+
+    it('should return 503 when ensureDelay returns 503 after 404 from queryDelay', async () => {
+      // ADR-031: ensure-path upstream error → propagate 503
+      mockMatchJourney.mockResolvedValueOnce({ statusCode: 200, body: JM_MATCH_RESPONSE_DELAYED });
+      mockQueryDelay.mockResolvedValueOnce({ statusCode: 404, body: { error: 'unknown_journey' } });
+      mockEnsureDelay.mockResolvedValueOnce({ statusCode: 503, body: { error: 'upstream_unavailable' } });
+
+      const app = buildApp();
+      const res = await request(app)
+        .post('/api/journeys/check-delay')
+        .set('x-correlation-id', CORRELATION_ID_001)
+        .send(VALID_CHECK_DELAY_BODY);
+
+      // ensure failure → 503 (not silent pending)
+      expect(res.status).toBe(503);
+
+      // Eligibility MUST NOT be called after ensure failure
+      expect(mockGetEligibility).not.toHaveBeenCalled();
     });
   });
 
@@ -861,9 +904,18 @@ describe('RAILREPAY-WEB-BFF-005: check-delay handler unit tests', () => {
       });
 
       it('AC-1: triggerEvaluation should NOT be called when delay-tracker returns 404 (pending step)', async () => {
-        // AC-1 boundary: trigger only fires when delay IS available but eligibility is missing
+        // AC-1 boundary: trigger only fires when delay IS available but eligibility is missing.
+        // ADR-031 harness note: when queryDelay returns 404, the handler now calls ensureDelay
+        // (not returning pending). ensureDelay must be set up to return a terminal result so
+        // the handler can complete. The assertion remains valid: on the 404→ensure path,
+        // there is no eligibility-engine call so triggerEvaluation is NOT invoked.
         mockMatchJourney.mockResolvedValueOnce({ statusCode: 200, body: JM_MATCH_RESPONSE_DELAYED });
         mockQueryDelay.mockResolvedValueOnce({ statusCode: 404, body: { error: 'unknown_journey' } });
+        // ADR-031: ensure returns on_time terminal — no eligibility call follows → no trigger
+        mockEnsureDelay.mockResolvedValueOnce({
+          statusCode: 200,
+          body: { status: 'on_time', delay_minutes: 0, cancelled: false, toc_code: 'GR', last_observed_at: '2026-06-03T10:30:00.000Z' },
+        });
 
         const app = buildApp();
         await request(app)
@@ -871,7 +923,8 @@ describe('RAILREPAY-WEB-BFF-005: check-delay handler unit tests', () => {
           .set('x-correlation-id', CORRELATION_ID_001)
           .send(VALID_CHECK_DELAY_BODY);
 
-        // AC-1: MUST NOT trigger evaluation when delay data is not yet available
+        // AC-1: MUST NOT trigger evaluation when delay data is not yet available.
+        // After ADR-031: ensure returns on_time → no delayed path → no eligibility call → no trigger.
         expect(mockTriggerEvaluation).not.toHaveBeenCalled();
       });
     });

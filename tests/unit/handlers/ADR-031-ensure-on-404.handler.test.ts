@@ -100,8 +100,8 @@ vi.mock('../../../src/lib/delay-tracker-client.js', () => ({
   queryDelay: mockQueryDelay,
   ensureDelay: mockEnsureDelay,
   DELAY_TRACKER_TIMEOUT_MS: 2000,
-  // AC-9: ENSURE_TIMEOUT_MS will be added by Blake — currently undefined (RED)
-  ENSURE_TIMEOUT_MS: undefined,
+  // AC-9: ENSURE_TIMEOUT_MS = 10000 (Blake exports this from delay-tracker-client.ts)
+  ENSURE_TIMEOUT_MS: 10000,
 }));
 
 vi.mock('../../../src/lib/eligibility-engine-client.js', () => ({
