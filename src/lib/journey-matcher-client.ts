@@ -122,6 +122,9 @@ export interface MatchJourneyInput {
   ticket_type?: string;
   actual_departure_time?: string;
   actual_rid?: string;
+  // BL-336 SS3: per-leg attestation fields
+  onward_plan?: boolean;
+  intended_legs?: Array<{ segment_order: number; rid: string }>;
 }
 
 /**

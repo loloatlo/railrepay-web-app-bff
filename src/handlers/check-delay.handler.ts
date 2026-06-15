@@ -91,6 +91,9 @@ interface CheckDelayBody {
   ticket_type?: string;
   actual_departure_time?: string;
   actual_rid?: string;
+  // BL-336 SS3: per-leg attestation fields
+  onward_plan?: boolean;
+  intended_legs?: Array<{ segment_order: number; rid: string }>;
 }
 
 /** Validation issue for a single field */
@@ -144,6 +147,29 @@ function validateCheckDelayBody(raw: unknown): { data: CheckDelayBody } | { issu
     }
   }
 
+  // BL-336 SS3: intended_legs — optional array of {segment_order: int>0, rid: string.min(1)}
+  if (obj.intended_legs !== undefined) {
+    if (!Array.isArray(obj.intended_legs)) {
+      issues.push({ field: 'intended_legs', message: 'intended_legs must be an array of {segment_order, rid} objects' });
+    } else {
+      const legs = obj.intended_legs as unknown[];
+      for (let i = 0; i < legs.length; i++) {
+        const leg = legs[i];
+        if (typeof leg !== 'object' || leg === null || Array.isArray(leg)) {
+          issues.push({ field: `intended_legs[${i}]`, message: 'each intended_leg must be an object' });
+          continue;
+        }
+        const legObj = leg as Record<string, unknown>;
+        if (typeof legObj.segment_order !== 'number' || !Number.isInteger(legObj.segment_order) || legObj.segment_order <= 0) {
+          issues.push({ field: `intended_legs[${i}].segment_order`, message: 'segment_order must be a positive integer (> 0)' });
+        }
+        if (typeof legObj.rid !== 'string' || legObj.rid.trim().length === 0) {
+          issues.push({ field: `intended_legs[${i}].rid`, message: 'rid must be a non-empty string' });
+        }
+      }
+    }
+  }
+
   if (issues.length > 0) {
     return { issues };
   }
@@ -160,6 +186,11 @@ function validateCheckDelayBody(raw: unknown): { data: CheckDelayBody } | { issu
       ...(obj.ticket_type !== undefined ? { ticket_type: obj.ticket_type as string } : {}),
       ...(obj.actual_departure_time !== undefined ? { actual_departure_time: obj.actual_departure_time as string } : {}),
       ...(obj.actual_rid !== undefined ? { actual_rid: obj.actual_rid as string } : {}),
+      // BL-336 SS3: per-leg attestation fields
+      ...(obj.onward_plan !== undefined ? { onward_plan: obj.onward_plan as boolean } : {}),
+      ...(obj.intended_legs !== undefined ? {
+        intended_legs: (obj.intended_legs as Array<{ segment_order: number; rid: string }>),
+      } : {}),
     },
   };
 }
@@ -216,6 +247,41 @@ export function createCheckDelayHandler(): RequestHandler {
 
     const body = validationResult.data;
 
+    // ── BL-336 SS3: Cross-field validations ──────────────────────────────────
+    // These fire AFTER base schema validation but BEFORE any matcher call.
+
+    // AC-SS3-3: onward_plan:true requires actual_rid (BFF-side refine)
+    if (body.onward_plan === true && !body.actual_rid) {
+      logger.info('check-delay: onward_plan:true without actual_rid — validation error', {
+        component: 'web-app-bff/check-delay-handler',
+        outcome: 'validation_error',
+        correlationId,
+      });
+      getCounter().inc({ outcome: 'validation_error' });
+      getHistogram().observe((Date.now() - startMs) / 1000);
+      res.status(400).json({
+        error: 'validation_error',
+        detail: 'onward_plan:true requires actual_rid to identify the boarded service',
+      });
+      return;
+    }
+
+    // Residual: onward_plan:true AND intended_legs both present → mutually exclusive
+    if (body.onward_plan === true && body.intended_legs !== undefined) {
+      logger.info('check-delay: onward_plan:true and intended_legs are mutually exclusive', {
+        component: 'web-app-bff/check-delay-handler',
+        outcome: 'validation_error',
+        correlationId,
+      });
+      getCounter().inc({ outcome: 'validation_error' });
+      getHistogram().observe((Date.now() - startMs) / 1000);
+      res.status(400).json({
+        error: 'validation_error',
+        detail: 'onward_plan and intended_legs are mutually exclusive — use one or the other',
+      });
+      return;
+    }
+
     // ── AC-3/4/5/6: Sequential 3-call orchestration ───────────────────────────
 
     // Step 1: journey-matcher (AC-6, AC-9)
@@ -235,6 +301,9 @@ export function createCheckDelayHandler(): RequestHandler {
           ...(body.ticket_type !== undefined ? { ticket_type: body.ticket_type } : {}),
           ...(body.actual_departure_time !== undefined ? { actual_departure_time: body.actual_departure_time } : {}),
           ...(body.actual_rid !== undefined ? { actual_rid: body.actual_rid } : {}),
+          // BL-336 SS3: Forward per-leg attestation fields when present
+          ...(body.onward_plan !== undefined ? { onward_plan: body.onward_plan } : {}),
+          ...(body.intended_legs !== undefined ? { intended_legs: body.intended_legs } : {}),
         },
         correlationId
       );
@@ -271,7 +340,21 @@ export function createCheckDelayHandler(): RequestHandler {
     // A 4xx from the matcher (e.g. actual_departure_time not HH:MM) must not fall through
     // to the candidates/no_match branches, which would dereference undefined journey_id
     // and call delay-tracker with undefined. Return 400 immediately.
+    // BL-336 SS3 (AC-SS3-6): discriminate invalid_intended_leg — preserve that error label
+    // rather than collapsing it to the generic validation_error.
     if (jmResult.statusCode >= 400 && jmResult.statusCode < 500) {
+      if (jmResult.body.error === 'invalid_intended_leg') {
+        logger.warn('check-delay: journey-matcher returned invalid_intended_leg', {
+          component: 'web-app-bff/check-delay-handler',
+          outcome: 'invalid_intended_leg',
+          statusCode: jmResult.statusCode,
+          correlationId,
+        });
+        getCounter().inc({ outcome: 'invalid_intended_leg' });
+        getHistogram().observe((Date.now() - startMs) / 1000);
+        res.status(400).json({ error: 'invalid_intended_leg', service: 'journey-matcher' });
+        return;
+      }
       logger.warn('check-delay: journey-matcher returned 4xx — validation error', {
         component: 'web-app-bff/check-delay-handler',
         outcome: 'matcher_validation_error',
@@ -293,6 +376,21 @@ export function createCheckDelayHandler(): RequestHandler {
         correlationId,
       });
       getCounter().inc({ outcome: 'candidates' });
+      getHistogram().observe((Date.now() - startMs) / 1000);
+      res.status(200).json(jmResult.body);
+      return;
+    }
+
+    // BL-336 SS3 (AC-SS3-2): intended_itinerary path — Mode B pass-through.
+    // BFF returns the itinerary body verbatim with journey_id:null.
+    // Does NOT proceed to delay-tracker or eligibility-engine.
+    if (jmResult.body.status === 'intended_itinerary') {
+      logger.info('check-delay: journey-matcher returned intended_itinerary — returning verbatim', {
+        component: 'web-app-bff/check-delay-handler',
+        outcome: 'intended_itinerary',
+        correlationId,
+      });
+      getCounter().inc({ outcome: 'intended_itinerary' });
       getHistogram().observe((Date.now() - startMs) / 1000);
       res.status(200).json(jmResult.body);
       return;
