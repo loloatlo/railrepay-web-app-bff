@@ -355,8 +355,26 @@ function buildApp(sessionUserId: string | null = CHECK_DELAY_USER.user_id) {
 describe('BL-336 SS3: BFF per-leg attestation contract (check-delay handler)', () => {
 
   beforeEach(() => {
+    // vi.clearAllMocks() resets call history but PRESERVES factory-internal mock
+    // implementations (MockCounter, MockHistogram, getRegistry inside vi.mock factory).
+    // vi.resetAllMocks() would also clear those factory-internal mocks, which breaks
+    // getCounter()/getHistogram() inside the handler (getRegistry() returns undefined
+    // → TypeError → Express async handler never sends a response → test hangs at 120s).
+    //
+    // To clear the once-queue (mockResolvedValueOnce bleed) without resetting factory
+    // internals, we call .mockReset() on ONLY the five client-level mocks. mockReset()
+    // clears call history + once-queue for a specific mock without touching other mocks.
+    //
+    // Self-fix (Test Lock Rule §Self-Fix Procedure): mock-leak + factory-reset fix,
+    // BL-336 SS3, 2026-06-15. Semantic requirement unchanged — tests still fail/pass
+    // on the correct behaviors. Only the mock isolation mechanism is corrected.
     vi.clearAllMocks();
-    // Default: evaluation-coordinator resolves (non-fatal anyway)
+    mockMatchJourney.mockReset();
+    mockQueryDelay.mockReset();
+    mockEnsureDelay.mockReset();
+    mockGetEligibility.mockReset();
+    mockTriggerEvaluation.mockReset();
+    // Default: evaluation-coordinator resolves (non-fatal anyway).
     mockTriggerEvaluation.mockResolvedValue(undefined);
   });
 
