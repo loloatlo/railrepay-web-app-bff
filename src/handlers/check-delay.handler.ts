@@ -577,6 +577,47 @@ export function createCheckDelayHandler(): RequestHandler {
 
         // Full composite from ensure + eligibility
         const eeBody = eeResult.body;
+
+        // BL-359 AC-3: reconciliation guard — if the eligibility row's delay_minutes
+        // disagrees with the ensure headline, the EE row is stale (evaluated before the
+        // real delay arrived). Return pending_eligibility and re-trigger so the user
+        // never sees the "27 min headline / 0 min reason" contradiction.
+        const ensureDelayMinutes = dtResultFromEnsure.body.delay_minutes;
+        const eeDelayMinutes = eeBody.delay_minutes;
+        if (
+          typeof ensureDelayMinutes === 'number' &&
+          typeof eeDelayMinutes === 'number' &&
+          ensureDelayMinutes !== eeDelayMinutes
+        ) {
+          const rawBody = req.body as Record<string, unknown>;
+          const delayBodyTocCode = dtResultFromEnsure.body.toc_code;
+          const triggerPayload: { delay_minutes?: number; ticket_fare_pence?: number; toc_code?: string | null } = {
+            delay_minutes: ensureDelayMinutes,
+            ticket_fare_pence: typeof rawBody.ticket_fare_pence === 'number' ? rawBody.ticket_fare_pence : (typeof rawBody.fare_pence === 'number' ? rawBody.fare_pence : undefined),
+            toc_code: (typeof delayBodyTocCode === 'string' || delayBodyTocCode === null) ? delayBodyTocCode : undefined,
+          };
+          Promise.resolve(triggerEvaluation(journeyId, correlationId, triggerPayload)).catch(() => {});
+          logger.info('check-delay: stale eligibility mismatch detected — returning pending_eligibility', {
+            component: 'web-app-bff/check-delay-handler',
+            outcome: 'pending_eligibility',
+            ensureDelayMinutes,
+            eeDelayMinutes,
+            correlationId,
+          });
+          getCounter().inc({ outcome: 'pending_eligibility' });
+          getHistogram().observe((Date.now() - startMs) / 1000);
+          res.status(200).json({
+            matched: true,
+            journey_id: journeyId,
+            delay_minutes: ensureDelayMinutes,
+            cancelled: dtResultFromEnsure.body.cancelled,
+            last_observed_at: dtResultFromEnsure.body.last_observed_at,
+            status: 'pending_eligibility',
+            message: 'eligibility evaluation not yet available — check back shortly',
+          });
+          return;
+        }
+
         logger.info('check-delay: full composite from ensure path', {
           component: 'web-app-bff/check-delay-handler',
           outcome: ensureStatus,
